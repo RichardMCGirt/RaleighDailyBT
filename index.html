@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Subs to Pay Export (Web App)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- SheetJS (XLSX) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    body { margin: 24px; }
+    h1 { margin: 0 0 8px; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; margin: 16px 0; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    button { padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; background: #fafafa; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    input[type="text"] { padding: 10px; border: 1px solid #ccc; border-radius: 8px; min-width: 320px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+    th, td { border: 1px solid #eee; padding: 6px 8px; font-size: 14px; }
+    th { background: #f7f7f7; position: sticky; top: 0; }
+    .muted { color: #666; font-size: 13px; }
+    .nowrap { white-space: nowrap; }
+    .ok { color: #0a7; }
+    .warn { color: #b60; }
+    .err { color: #c33; }
+    .hidden-col-note { font-size: 12px; color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Subs to Pay Export (Web App)</h1>
+  <div class="muted">Upload your CSV/XLSX. We’ll copy the first 15 columns, <strong>hide column A</strong>, auto-detect the header row, sort rows by column 13 (M), and let you download the result.</div>
+
+  <div class="card">
+    <div class="row">
+      <input type="file" id="fileInput" accept=".xlsx,.xlsb,.xls,.csv" />
+      <button id="processBtn" disabled>Process File</button>
+      <button id="dlXlsxBtn" disabled>Download XLSX</button>
+      <button id="dlCsvBtn" disabled>Download CSV</button>
+    </div>
+    <div class="muted">Uses the sheet named <strong>“Subs to Pay”</strong> if present, otherwise the first sheet.</div>
+    <div id="status" class="muted" style="margin-top:8px;"></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div><strong>Sort Column (1-based)</strong>:</div>
+      <input type="text" id="sortCol" value="13" class="nowrap" />
+      <div class="muted">Default is 13 (column M), ascending. The detected header row is never sorted.</div>
+    </div>
+    <div class="hidden-col-note">Note: Column A is hidden in preview and will be hidden in the XLSX export.</div>
+  </div>
+
+  <div class="card">
+    <div><strong>Preview</strong></div>
+    <div id="preview"></div>
+  </div>
+
+  <script>
+    // === Utilities ============================================================
+    function formatMMDDYYYY(d) {
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const dd = String(d.getDate()).padStart(2, "0");
+      const yyyy = String(d.getFullYear());
+      return `${mm}-${dd}-${yyyy}`;
+    }
+
+    function toArrayOfArrays(ws) {
+      return XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
+    }
+
+    function safeParseDate(val) {
+      if (val == null) return null;
+      if (typeof val === "number") {
+        const d = XLSX.SSF.parse_date_code(val);
+        if (d) {
+          const js = new Date(Date.UTC(d.y, d.m - 1, d.d, d.H || 0, d.M || 0, d.S || 0));
+          return js.getTime();
+        }
+      }
+      const s = String(val).trim();
+      if (!s) return null;
+      const t = Date.parse(s);
+      return Number.isNaN(t) ? null : t;
+    }
+
+    function isNumericLike(v) {
+      if (v === "" || v == null) return false;
+      const n = Number(v);
+      return Number.isFinite(n);
+    }
+
+    function isDateLike(v) {
+      return safeParseDate(v) !== null;
+    }
+
+    // Heuristic scoring to find the most "header-like" row:
+    // - rewards strings
+    // - penalizes numeric/date-heavy rows
+    // - bonus for matching common header keywords
+    const HEADER_KEYWORDS = [
+      "title","complete","percent","phase","duration","start","end","assigned",
+      "accepted","pending","declined","pred","type","lag","id","status","date","vendor","amount","invoice"
+    ];
+    function scoreRowForHeader(row, takeCols = 15) {
+      let score = 0;
+      for (let i = 0; i < Math.min(takeCols, row.length); i++) {
+        const cell = row[i];
+        const s = String(cell ?? "").trim();
+        if (!s) continue;
+        const lower = s.toLowerCase();
+
+        // Strongly penalize numeric/date cells
+        if (isNumericLike(s) || isDateLike(s)) { score -= 2; continue; }
+
+        // Strings: reward
+        score += 2;
+
+        // Keyword bonuses
+        for (const kw of HEADER_KEYWORDS) {
+          if (lower.includes(kw)) { score += 2; break; }
+        }
+
+        // Short, label-ish words boost
+        if (/^[a-z][a-z\s\/%-]{1,20}$/.test(lower)) score += 1;
+      }
+      return score;
+    }
+
+    function detectHeaderRowIndex(aoa, takeCols = 15) {
+      let bestIdx = -1;
+      let bestScore = -Infinity;
+      for (let r = 0; r < aoa.length; r++) {
+        const row = aoa[r] || [];
+        const nonBlanks = row.slice(0, takeCols).filter(c => String(c ?? "").trim() !== "").length;
+        if (nonBlanks === 0) continue; // skip empty rows
+        const s = scoreRowForHeader(row, takeCols);
+        if (s > bestScore) { bestScore = s; bestIdx = r; }
+      }
+      return bestIdx;
+    }
+
+    function rowsEqual(a, b) {
+      const len = Math.max(a?.length || 0, b?.length || 0);
+      for (let i = 0; i < len; i++) {
+        const va = String(a?.[i] ?? "").trim().toLowerCase();
+        const vb = String(b?.[i] ?? "").trim().toLowerCase();
+        if (va !== vb) return false;
+      }
+      return true;
+    }
+
+    function stableSortByColumn(rows, colIndex) {
+      return rows
+        .map((row, i) => ({ row, i }))
+        .sort((a, b) => {
+          const A = a.row[colIndex];
+          const B = b.row[colIndex];
+          const da = safeParseDate(A);
+          const db = safeParseDate(B);
+          if (da !== null && db !== null) {
+            if (da < db) return -1;
+            if (da > db) return 1;
+            return a.i - b.i;
+          }
+          const sA = (A == null ? "" : String(A));
+          const sB = (B == null ? "" : String(B));
+          const cmp = sA.localeCompare(sB, undefined, { numeric: true, sensitivity: "base" });
+          if (cmp !== 0) return cmp;
+          return a.i - b.i;
+        })
+        .map(x => x.row);
+    }
+
+    function renderPreview(tableAoA, maxRows = 200) {
+      const container = document.getElementById("preview");
+      container.innerHTML = "";
+      if (!tableAoA || tableAoA.length === 0) {
+        container.innerHTML = '<div class="muted">No data to preview.</div>';
+        return;
+      }
+      const table = document.createElement("table");
+      const thead = document.createElement("thead");
+      const tbody = document.createElement("tbody");
+
+      // Header (skip hidden col 0 for preview)
+      const header = tableAoA[0] || [];
+      const trh = document.createElement("tr");
+      for (let c = 1; c < header.length; c++) {
+        const th = document.createElement("th");
+        th.textContent = header[c];
+        trh.appendChild(th);
+      }
+      thead.appendChild(trh);
+
+      // Rows
+      const limit = Math.min(maxRows, tableAoA.length - 1);
+      for (let i = 1; i <= limit; i++) {
+        const row = tableAoA[i] || [];
+        const tr = document.createElement("tr");
+        for (let c = 1; c < header.length; c++) {
+          const td = document.createElement("td");
+          td.textContent = row[c] == null ? "" : row[c];
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      }
+
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      container.appendChild(table);
+
+      if (tableAoA.length - 1 > limit) {
+        const more = document.createElement("div");
+        more.className = "muted";
+        more.textContent = `Showing first ${limit} of ${tableAoA.length - 1} data rows.`;
+        container.appendChild(more);
+      }
+    }
+
+    // === State ================================================================
+    let sourceWorkbook = null;
+    let processedAoA = null;
+    let sourceSheetName = null;
+
+    const fileInput = document.getElementById("fileInput");
+    const processBtn = document.getElementById("processBtn");
+    const dlXlsxBtn = document.getElementById("dlXlsxBtn");
+    const dlCsvBtn = document.getElementById("dlCsvBtn");
+    const statusEl = document.getElementById("status");
+    const sortColInput = document.getElementById("sortCol");
+
+    // === Handlers =============================================================
+    fileInput.addEventListener("change", async (e) => {
+      resetState();
+      const file = e.target.files && e.target.files[0];
+      if (!file) {
+        statusEl.innerHTML = '<span class="warn">No file selected.</span>';
+        return;
+      }
+
+      try {
+        const data = await file.arrayBuffer();
+        const wb = XLSX.read(data, { type: "array", dense: true });
+        sourceWorkbook = wb;
+        const targetName = wb.SheetNames.includes("Subs to Pay")
+          ? "Subs to Pay"
+          : wb.SheetNames[0];
+        sourceSheetName = targetName;
+
+        statusEl.innerHTML = `<span class="ok">Loaded workbook.</span> Using sheet: <strong>${targetName}</strong>`;
+        processBtn.disabled = false;
+      } catch (err) {
+        statusEl.innerHTML = `<span class="err">Failed to read file: ${err?.message || err}</span>`;
+      }
+    });
+
+    processBtn.addEventListener("click", () => {
+      if (!sourceWorkbook || !sourceSheetName) {
+        statusEl.innerHTML = '<span class="err">No workbook loaded.</span>';
+        return;
+      }
+
+      const ws = sourceWorkbook.Sheets[sourceSheetName];
+      if (!ws) {
+        statusEl.innerHTML = `<span class="err">Sheet "${sourceSheetName}" not found.</span>`;
+        return;
+      }
+
+      const aoaRaw = toArrayOfArrays(ws);
+      if (aoaRaw.length === 0) {
+        statusEl.innerHTML = '<span class="warn">Sheet is empty.</span>';
+        return;
+      }
+
+      // 1) Extract first 15 columns + drop fully blank rows
+      const sliced = aoaRaw
+        .map(row => {
+          const out = new Array(15);
+          for (let i = 0; i < 15; i++) out[i] = row?.[i] ?? "";
+          return out;
+        })
+        .filter(r => r.some(c => String(c ?? "").trim() !== ""));
+
+      if (sliced.length === 0) {
+        statusEl.innerHTML = '<span class="warn">No non-blank rows found.</span>';
+        return;
+      }
+
+      // 2) Detect the most "header-like" row anywhere in the sheet
+      const hdrIdx = detectHeaderRowIndex(sliced, 15);
+      const header = sliced[hdrIdx];
+
+      // 3) Body = all rows except the detected header row
+      let body = sliced.filter((_, i) => i !== hdrIdx);
+
+      // Extra safety: remove any duplicate of the header that might appear again
+      body = body.filter(r => !rowsEqual(r, header));
+
+      // 4) Sort body by chosen column (default 13)
+      const sortCol1Based = Math.max(1, parseInt((sortColInput.value || "13").trim(), 10));
+      const sortIdx = sortCol1Based - 1;
+      const sortedBody = stableSortByColumn(body, sortIdx);
+
+      // 5) Rebuild final AoA (header on top)
+      processedAoA = [header, ...sortedBody];
+
+      // 6) Render preview (hides column A visually)
+      renderPreview(processedAoA);
+
+      // 7) Enable downloads
+      dlXlsxBtn.disabled = false;
+      dlCsvBtn.disabled = false;
+
+      const today = new Date();
+      const stamp = formatMMDDYYYY(today);
+      statusEl.innerHTML = `<span class="ok">Processed.</span> Sheet name will be <strong>Subs to Pay Export ${stamp}</strong>. Rows: ${processedAoA.length - 1}`;
+    });
+
+    dlXlsxBtn.addEventListener("click", () => {
+      if (!processedAoA) {
+        statusEl.innerHTML = '<span class="warn">Nothing to download yet. Process a file first.</span>';
+        return;
+      }
+      const today = new Date();
+      const stamp = formatMMDDYYYY(today);
+      const ws = XLSX.utils.aoa_to_sheet(processedAoA);
+
+      // Hide column A in the Excel export
+      const colCount = processedAoA[0]?.length ?? 15;
+      ws['!cols'] = new Array(colCount).fill(null).map((_, i) => {
+        if (i === 0) return { hidden: true };
+        return {};
+      });
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, `Subs to Pay Export ${stamp}`);
+      const filename = `Subs to Pay Export ${stamp}.xlsx`;
+      XLSX.writeFile(wb, filename);
+    });
+
+    dlCsvBtn.addEventListener("click", () => {
+      if (!processedAoA) {
+        statusEl.innerHTML = '<span class="warn">Nothing to download yet. Process a file first.</span>';
+        return;
+      }
+      // Keep all columns in CSV (CSV can't hide columns).
+      const ws = XLSX.utils.aoa_to_sheet(processedAoA);
+      const csv = XLSX.utils.sheet_to_csv(ws);
+
+      const today = new Date();
+      const stamp = formatMMDDYYYY(today);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Subs to Pay Export ${stamp}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      URL.revokeObjectURL(url);
+      a.remove();
+    });
+
+    function resetState() {
+      sourceWorkbook = null;
+      processedAoA = null;
+      sourceSheetName = null;
+      processBtn.disabled = true;
+      dlXlsxBtn.disabled = true;
+      dlCsvBtn.disabled = true;
+      document.getElementById("preview").innerHTML = "";
+      statusEl.textContent = "";
+    }
+  </script>
+</body>
+</html>
