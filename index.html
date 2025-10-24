@@ -1,374 +1,472 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Subs to Pay Export (Web App)</title>
+  <meta charset="utf-8" />
+  <title>Who To Pay — Single-Bucket per Job (Trades > Invoice > Close > Lien)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- SheetJS (XLSX) -->
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <style>
-    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
-    body { margin: 24px; }
-    h1 { margin: 0 0 8px; }
-    .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; margin: 16px 0; }
-    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-    button { padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; background: #fafafa; cursor: pointer; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    input[type="text"] { padding: 10px; border: 1px solid #ccc; border-radius: 8px; min-width: 320px; }
-    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
-    th, td { border: 1px solid #eee; padding: 6px 8px; font-size: 14px; }
-    th { background: #f7f7f7; position: sticky; top: 0; }
-    .muted { color: #666; font-size: 13px; }
-    .nowrap { white-space: nowrap; }
-    .ok { color: #0a7; }
-    .warn { color: #b60; }
-    .err { color: #c33; }
-    .hidden-col-note { font-size: 12px; color: #666; }
+    :root { --border:#e6e8ef; --muted:#6b7280; --accent:#3b5bff; --bg:#f8faff; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin:24px; color:#0f172a; }
+    h1 { margin:0 0 8px; }
+    .sub { margin:0 0 16px; color:var(--muted); }
+    .card { border:1px solid var(--border); border-radius:12px; padding:16px; background:#fff; margin-bottom:14px; }
+    input[type=file]{ padding:10px; border:1px dashed #cfd3e3; border-radius:10px; background:#f8faff; width:100%; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    button { padding:10px 14px; cursor:pointer; border-radius:8px; border:1px solid #cfd3e3; background:#f7f8ff; }
+    button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .pill { font-size:11px; padding:2px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; }
+    .note { font-size:12px; color:#6b7280; margin-top:6px; }
+    .log { white-space:pre-wrap; background:#0b1020; color:#dbe4ff; padding:12px; border-radius:10px; min-height:160px; max-height:44vh; overflow:auto; }
+    .ok { color:#14b8a6; }
+    .err{ color:#ef4444; }
+
+    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; align-items:start; }
+    .col { border:1px solid var(--border); border-radius:10px; overflow:hidden; background:#fff; }
+    .col .hdr { font-weight:700; padding:8px 10px; background:#f1f5ff; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
+    .col .list { padding:8px 10px; max-height:50vh; overflow:auto; line-height:1.5; font-size:14px; }
+    .muted { color:#6b7280; }
+    .item + .item { margin-top:4px; }
+
+    textarea { width:100%; min-height:120px; padding:8px; border:1px solid var(--border); border-radius:10px; background:#fcfcfe; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .explain { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:13px; white-space:pre-wrap; background:#0b1020; color:#dbe4ff; padding:12px; border-radius:10px; }
   </style>
 </head>
 <body>
-  <h1>Subs to Pay Export (Web App)</h1>
-  <div class="muted">Upload your CSV/XLSX. We’ll copy the first 15 columns, <strong>hide column A</strong>, auto-detect the header row, sort rows by column 13 (M), and let you download the result.</div>
+  <h1>Who To Pay — Final Outcome</h1>
+  <p class="sub">Each job appears in <b>one</b> bucket based on priority: <b>Trades To Pay</b> → <b>Jobs To Invoice</b> → <b>Jobs To Close</b> → <b>Liens Needed</b>. Upload your workbook and click Compute.</p>
 
   <div class="card">
     <div class="row">
-      <input type="file" id="fileInput" accept=".xlsx,.xlsb,.xls,.csv" />
-      <button id="processBtn" disabled>Process File</button>
-      <button id="dlXlsxBtn" disabled>Download XLSX</button>
-      <button id="dlCsvBtn" disabled>Download CSV</button>
+      <input id="fileInput" type="file" accept=".xlsx,.xls" />
+      <button id="runBtn" class="primary">Compute</button>
+      <button id="downloadBtn" disabled>Download Excel (MM-dd-yyyy)</button>
+      <span id="countBadge" class="pill">0 rows</span>
     </div>
-    <div class="muted">Uses the sheet named <strong>“Subs to Pay”</strong> if present, otherwise the first sheet.</div>
-    <div id="status" class="muted" style="margin-top:8px;"></div>
+    <div class="row" style="margin-top:8px">
+      <label><input type="checkbox" id="verbose" checked /> Verbose diagnostics</label>
+    </div>
+    <div id="detected" class="note"></div>
   </div>
 
   <div class="card">
-    <div class="row">
-      <div><strong>Sort Column (1-based)</strong>:</div>
-      <input type="text" id="sortCol" value="13" class="nowrap" />
-      <div class="muted">Default is 13 (column M), ascending. The detected header row is never sorted.</div>
-    </div>
-    <div class="hidden-col-note">Note: Column A is hidden in preview and will be hidden in the XLSX export.</div>
+    <strong>Preview</strong>
+    <div id="summary" class="muted" style="margin-top:4px;">No results yet.</div>
+    <div id="grid" class="grid" style="margin-top:10px;"></div>
   </div>
 
   <div class="card">
-    <div><strong>Preview</strong></div>
-    <div id="preview"></div>
+    <strong>Explain why these should be “Jobs To Invoice”</strong>
+    <div class="note" style="margin:6px 0 10px">Paste job names (one per line), then click <b>Explain</b>. You’ll see all sheet rows for each job, the rule that won, and why other rules lost.</div>
+    <textarea id="inspectInput" placeholder="e.g.
+610 Walnut
+138 Sullivan Farms
+154 Miller Farm
+..."></textarea>
+    <div class="row" style="margin-top:8px;">
+      <button id="inspectBtn">Explain</button>
+    </div>
+    <div id="inspectOut" class="explain" style="margin-top:10px;"></div>
   </div>
 
+  <div class="card">
+    <strong>Logs</strong>
+    <div id="log" class="log"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script>
-    // === Utilities ============================================================
-    function formatMMDDYYYY(d) {
-      const mm = String(d.getMonth() + 1).padStart(2, "0");
-      const dd = String(d.getDate()).padStart(2, "0");
-      const yyyy = String(d.getFullYear());
-      return `${mm}-${dd}-${yyyy}`;
-    }
+    /* ----------------- logger ----------------- */
+    const $log = document.getElementById('log');
+    const $verbose = document.getElementById('verbose');
+    function log(msg, cls=""){ const d=document.createElement('div'); d.textContent=msg; if(cls)d.className=cls; $log.appendChild(d); $log.scrollTop=$log.scrollHeight; }
+    function vlog(msg, cls=""){ if($verbose.checked) log(msg, cls); }
+    function sep(){ vlog("—".repeat(72)); }
 
-    function toArrayOfArrays(ws) {
-      return XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
-    }
+    /* ----------------- helpers ---------------- */
+    function safeCell(v){ return v==null ? "" : (typeof v==="string"? v : String(v)); }
+    function norm(s){ return String(s||"").toLowerCase().replace(/[^a-z0-9]+/g,""); }
+    function contains(text, phrase){ if(!phrase) return false; return String(text||"").toLowerCase().includes(String(phrase).toLowerCase()); }
+    function anyContains(text, phrases){ const t=String(text||"").toLowerCase(); return phrases.some(p=>t.includes(p.toLowerCase())); }
+    function isTruthy(v){ const t=String(v).trim().toLowerCase(); if (t==="") return false; return ["true","1","yes","y","to pay","pay","x","✓"].includes(t) || (t!=="false"&&t!=="0"&&t!=="no"); }
+    function isFalse(v){ const t=String(v).trim().toLowerCase(); return t==="false"||t==="0"||t==="no"; }
+    function dateStamp(){ const d=new Date(); const mm=String(d.getMonth()+1).padStart(2,'0'); const dd=String(d.getDate()).padStart(2,'0'); const yyyy=String(d.getFullYear()); return `${mm}-${dd}-${yyyy}`; }
+    function colLetterFromIndex(i){ let n=i+1,s=""; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=Math.floor((n-1)/26);} return s; }
+    function dumpRow(label, row, n=30){ const cells=(row||[]).slice(0,n).map((v,i)=>`${colLetterFromIndex(i)}:${safeCell(v)}`); vlog(`${label}: ${cells.join(" | ")}`); }
 
-    function safeParseDate(val) {
-      if (val == null) return null;
-      if (typeof val === "number") {
-        const d = XLSX.SSF.parse_date_code(val);
-        if (d) {
-          const js = new Date(Date.UTC(d.y, d.m - 1, d.d, d.H || 0, d.M || 0, d.S || 0));
-          return js.getTime();
+    /* ----------------- DOM -------------------- */
+    const $file = document.getElementById('fileInput');
+    const $run = document.getElementById('runBtn');
+    const $download = document.getElementById('downloadBtn');
+    const $countBadge = document.getElementById('countBadge');
+    const $summary = document.getElementById('summary');
+    const $grid = document.getElementById('grid');
+    const $inspectInput = document.getElementById('inspectInput');
+    const $inspectBtn = document.getElementById('inspectBtn');
+    const $inspectOut = document.getElementById('inspectOut');
+
+    /* ----------------- state ------------------ */
+    let workbook = null;
+    let state = null; // rows, info, jobGroups, decision per job, etc.
+
+    /* ----------------- config ----------------- */
+    const TRADES = ["Siding","Painters","Columns","Trellis","Rails","Screen Porch","Decking","Waterproof","Louvered Wall","Gutters"];
+
+    // Patterns for row-based trade detection (Title text)
+    const TRADE_TITLE_PATTERNS = {
+      "Siding": [/paid\s*siding/i],
+      "Painters": [/paid\s*painters?/i, /paid\s*paint/i],
+      "Columns": [/paid\s*columns?/i],
+      "Trellis": [/paid\s*trellis/i],
+      "Rails": [/paid\s*rails?/i],
+      "Screen Porch": [/paid\s*screen\s*porch/i],
+      "Decking": [/paid\s*deck(ing)?/i],
+      "Waterproof": [/paid\s*water\s*proof/i, /paid\s*waterproof/i],
+      "Louvered Wall": [/paid\s*louver(ed)?\s*wall/i, /paid\s*louver/i],
+      "Gutters": [/paid\s*gutters?/i]
+    };
+
+    const PHRASES_INVOICE = ["invoice","ready to invoice","ready to bill","pay crew","ready to pay","bill now","billing","send invoice","invoice ready","ready for invoice"];
+    const PHRASES_CLOSE = ["job complete/inspected","job complete","100% job complete","close out","closed"];
+    const PHRASES_LIEN  = ["lien","liens needed","lien needed"];
+
+    /* ----------------- file handling ---------- */
+    $file.addEventListener('change', async ()=>{
+      try{
+        $log.textContent = "";
+        const f = $file.files?.[0]; if(!f) return;
+        log("Reading workbook: " + f.name);
+        const u8 = new Uint8Array(await f.arrayBuffer());
+        workbook = XLSX.read(u8, { type:'array' });
+
+        const sheetName = (workbook.SheetNames||[]).find(n=>n.toLowerCase()==="schedules") || workbook.SheetNames[0];
+        const ws = workbook.Sheets[sheetName];
+        const aoa = XLSX.utils.sheet_to_json(ws, { header:1, defval:"" });
+
+        log("Sheets: " + (workbook.SheetNames||[]).join(", "), "ok");
+        const nRows = aoa.length;
+        const nCols = Math.max(...aoa.map(r => r.length), 0);
+        vlog(`Sheet '${sheetName}' size: ${nRows} rows × ${nCols} columns`, "ok");
+        for (let r=0; r<Math.min(3, nRows); r++) dumpRow(`Row ${r+1} (peek)`, aoa[r], 17);
+        $summary.textContent = "Ready. Click Compute.";
+      }catch(e){ log(e?.message||String(e), "err"); }
+    });
+
+    /* ----------------- main ------------------- */
+    $run.addEventListener('click', ()=>{
+      try{
+        if (!workbook) throw new Error("Please upload a workbook first.");
+        const sheetName = (workbook.SheetNames||[]).find(n=>n.toLowerCase()==="schedules") || workbook.SheetNames[0];
+        const ws = workbook.Sheets[sheetName];
+        const aoa = XLSX.utils.sheet_to_json(ws, { header:1, defval:"" });
+        if (!aoa.length) throw new Error("No rows found.");
+
+        const pick = chooseHeaderRowWithFallback(aoa, 10);
+        const headers = aoa[pick.index] || [];
+        dumpRow(`Chosen header row ${pick.index+1} (raw)`, headers, 30);
+        dumpRow(`Chosen header row ${pick.index+1} (normalized)`, headers.map(norm), 30);
+
+        const info = detectColumnsFrom(headers); // Job-aware & Phase-aware
+        info.headerRowIndex = pick.index; info.headerReason = pick.reason;
+
+        const mapLines = [];
+        mapLines.push(`Job (key) -> ${colLetterFromIndex(info.keyIdx)} (${info.keyIdx})`);
+        if (info.phaseIdx>=0) mapLines.push(`Phase -> ${colLetterFromIndex(info.phaseIdx)} (${info.phaseIdx}) [PRIMARY STATUS]`);
+        if (info.titleIdx>=0) mapLines.push(`Title -> ${colLetterFromIndex(info.titleIdx)} (${info.titleIdx})`);
+        if (info.allNotesIdx>=0) mapLines.push(`All Notes -> ${colLetterFromIndex(info.allNotesIdx)} (${info.allNotesIdx})`);
+        if (info.completedIdx>=0) mapLines.push(`Completed -> ${colLetterFromIndex(info.completedIdx)} (${info.completedIdx})`);
+        if (info.percentCompleteIdx>=0) mapLines.push(`PercentComplete -> ${colLetterFromIndex(info.percentCompleteIdx)} (${info.percentCompleteIdx})`);
+        for (const t of TRADES){
+          const p = info.paidByTrade[t]; const q = info.toPayByTrade[t];
+          if (p>=0) mapLines.push(`Paid ${t} -> ${colLetterFromIndex(p)} (${p})`);
+          if (q>=0) mapLines.push(`${t} To Pay -> ${colLetterFromIndex(q)} (${q})`);
         }
-      }
-      const s = String(val).trim();
-      if (!s) return null;
-      const t = Date.parse(s);
-      return Number.isNaN(t) ? null : t;
-    }
+        sep(); vlog("Column mappings:\n" + mapLines.join("\n"), "ok"); sep();
 
-    function isNumericLike(v) {
-      if (v === "" || v == null) return false;
-      const n = Number(v);
-      return Number.isFinite(n);
-    }
+        const rows = aoa.slice(pick.index + 1);
+        $countBadge.textContent = `${rows.length} rows`;
 
-    function isDateLike(v) {
-      return safeParseDate(v) !== null;
-    }
+        // Build combined status helper
+        const combinedStatus = (r)=>{
+          const parts = [];
+          if (info.phaseIdx>=0) parts.push(safeCell(r[info.phaseIdx]));
+          if (info.titleIdx>=0) parts.push(safeCell(r[info.titleIdx]));
+          if (info.allNotesIdx>=0) parts.push(safeCell(r[info.allNotesIdx]));
+          return parts.filter(Boolean).join(" | ");
+        };
 
-    // Heuristic scoring to find the most "header-like" row:
-    // - rewards strings
-    // - penalizes numeric/date-heavy rows
-    // - bonus for matching common header keywords
-    const HEADER_KEYWORDS = [
-      "title","complete","percent","phase","duration","start","end","assigned",
-      "accepted","pending","declined","pred","type","lag","id","status","date","vendor","amount","invoice"
-    ];
-    function scoreRowForHeader(row, takeCols = 15) {
-      let score = 0;
-      for (let i = 0; i < Math.min(takeCols, row.length); i++) {
-        const cell = row[i];
-        const s = String(cell ?? "").trim();
-        if (!s) continue;
-        const lower = s.toLowerCase();
+        // -------- group rows by Job key --------
+        const jobGroups = new Map();
+        const keyIdx = info.keyIdx;
+        rows.forEach((r, i)=>{
+          const job = String(r[keyIdx]||"").trim();
+          if (!job) return;
+          const list = jobGroups.get(job) || [];
+          list.push({ r, rowNum: i + (pick.index+2) }); // 1-based + header
+          jobGroups.set(job, list);
+        });
+        log(`Grouped into ${jobGroups.size} unique jobs.`, "ok");
 
-        // Strongly penalize numeric/date cells
-        if (isNumericLike(s) || isDateLike(s)) { score -= 2; continue; }
-
-        // Strings: reward
-        score += 2;
-
-        // Keyword bonuses
-        for (const kw of HEADER_KEYWORDS) {
-          if (lower.includes(kw)) { score += 2; break; }
+        // -------- helper: match trade by Title + Completed(FALSE) --------
+        function titleIndicatesUnpaidTrade(trade, records){
+          const pats = TRADE_TITLE_PATTERNS[trade] || [];
+          if (!pats.length || info.titleIdx < 0) return false;
+          return records.some(({r})=>{
+            const title = safeCell(r[info.titleIdx]);
+            const unpaid = (info.completedIdx>=0) ? isFalse(r[info.completedIdx]) : true; // if no Completed col, assume unpaid
+            return unpaid && pats.some(rx => rx.test(title));
+          });
         }
 
-        // Short, label-ish words boost
-        if (/^[a-z][a-z\s\/%-]{1,20}$/.test(lower)) score += 1;
-      }
-      return score;
-    }
+        // -------- decide single bucket per job (priority) --------
+        const decideForJob = (job, records)=>{
+          // PRIORITY 1: Trades to pay
+          for (const trade of TRADES){
+            const paidIdx = info.paidByTrade[trade] ?? -1;
+            const toPayIdx = info.toPayByTrade[trade] ?? -1;
 
-    function detectHeaderRowIndex(aoa, takeCols = 15) {
-      let bestIdx = -1;
-      let bestScore = -Infinity;
-      for (let r = 0; r < aoa.length; r++) {
-        const row = aoa[r] || [];
-        const nonBlanks = row.slice(0, takeCols).filter(c => String(c ?? "").trim() !== "").length;
-        if (nonBlanks === 0) continue; // skip empty rows
-        const s = scoreRowForHeader(row, takeCols);
-        if (s > bestScore) { bestScore = s; bestIdx = r; }
-      }
-      return bestIdx;
-    }
-
-    function rowsEqual(a, b) {
-      const len = Math.max(a?.length || 0, b?.length || 0);
-      for (let i = 0; i < len; i++) {
-        const va = String(a?.[i] ?? "").trim().toLowerCase();
-        const vb = String(b?.[i] ?? "").trim().toLowerCase();
-        if (va !== vb) return false;
-      }
-      return true;
-    }
-
-    function stableSortByColumn(rows, colIndex) {
-      return rows
-        .map((row, i) => ({ row, i }))
-        .sort((a, b) => {
-          const A = a.row[colIndex];
-          const B = b.row[colIndex];
-          const da = safeParseDate(A);
-          const db = safeParseDate(B);
-          if (da !== null && db !== null) {
-            if (da < db) return -1;
-            if (da > db) return 1;
-            return a.i - b.i;
+            // (a) explicit columns
+            if (paidIdx >= 0 && records.some(({r}) => isFalse(r[paidIdx]))){
+              return { bucket:`${trade} To Pay`, reason:`Paid ${trade} = FALSE`, trade, extra:null };
+            }
+            if (toPayIdx >= 0 && records.some(({r}) => isTruthy(r[toPayIdx]) || String(r[toPayIdx]).trim()!=="")){
+              return { bucket:`${trade} To Pay`, reason:`${trade} To Pay marked`, trade, extra:null };
+            }
+            // (b) NEW: Title-based pattern e.g. "Paid Siding Sub" + Completed FALSE
+            if (titleIndicatesUnpaidTrade(trade, records)){
+              return { bucket:`${trade} To Pay`, reason:`Title indicates “Paid ${trade} …” with Completed = FALSE`, trade, extra:null };
+            }
           }
-          const sA = (A == null ? "" : String(A));
-          const sB = (B == null ? "" : String(B));
-          const cmp = sA.localeCompare(sB, undefined, { numeric: true, sensitivity: "base" });
-          if (cmp !== 0) return cmp;
-          return a.i - b.i;
-        })
-        .map(x => x.row);
-    }
+          // PRIORITY 2: Invoice
+          if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_INVOICE))){
+            const rec = records.find(({r}) => anyContains(combinedStatus(r), PHRASES_INVOICE));
+            const phrase = PHRASES_INVOICE.find(p => contains(combinedStatus(rec.r), p));
+            return { bucket:"Jobs To Invoice", reason:`contains “${phrase}” in ${combinedStatus(rec.r)}`, trade:null, extra:null };
+          }
+          // PRIORITY 3: Close
+          if (info.completedIdx>=0 && records.some(({r}) => isTruthy(r[info.completedIdx]))){
+            return { bucket:"Jobs To Close", reason:"Completed = TRUE", trade:null, extra:null };
+          }
+          if (info.percentCompleteIdx>=0 && records.some(({r}) => Number(r[info.percentCompleteIdx])>=100)){
+            return { bucket:"Jobs To Close", reason:"PercentComplete ≥ 100", trade:null, extra:null };
+          }
+          if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_CLOSE))){
+            const rec = records.find(({r}) => anyContains(combinedStatus(r), PHRASES_CLOSE));
+            const phrase = PHRASES_CLOSE.find(p => contains(combinedStatus(rec.r), p));
+            return { bucket:"Jobs To Close", reason:`contains “${phrase}”`, trade:null, extra:null };
+          }
+          // PRIORITY 4: Liens
+          if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_LIEN))){
+            return { bucket:"Liens Needed", reason:"lien phrase found", trade:null, extra:null };
+          }
+          // nothing matches
+          return { bucket:null, reason:"no rules matched", trade:null, extra:null };
+        };
 
-    function renderPreview(tableAoA, maxRows = 200) {
-      const container = document.getElementById("preview");
-      container.innerHTML = "";
-      if (!tableAoA || tableAoA.length === 0) {
-        container.innerHTML = '<div class="muted">No data to preview.</div>';
-        return;
-      }
-      const table = document.createElement("table");
-      const thead = document.createElement("thead");
-      const tbody = document.createElement("tbody");
-
-      // Header (skip hidden col 0 for preview)
-      const header = tableAoA[0] || [];
-      const trh = document.createElement("tr");
-      for (let c = 1; c < header.length; c++) {
-        const th = document.createElement("th");
-        th.textContent = header[c];
-        trh.appendChild(th);
-      }
-      thead.appendChild(trh);
-
-      // Rows
-      const limit = Math.min(maxRows, tableAoA.length - 1);
-      for (let i = 1; i <= limit; i++) {
-        const row = tableAoA[i] || [];
-        const tr = document.createElement("tr");
-        for (let c = 1; c < header.length; c++) {
-          const td = document.createElement("td");
-          td.textContent = row[c] == null ? "" : row[c];
-          tr.appendChild(td);
+        // assign jobs
+        const assignment = new Map(); // job -> {bucket, reason}
+        for (const [job, records] of jobGroups.entries()){
+          const decision = decideForJob(job, records);
+          assignment.set(job, decision);
         }
-        tbody.appendChild(tr);
+
+        // -------- build columns from assignment --------
+        const columns = [];
+        for (const trade of TRADES){
+          const items = [];
+          for (const [job, decision] of assignment.entries()){
+            if (decision.bucket === `${trade} To Pay`) items.push(job);
+          }
+          if (items.length) items.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
+          columns.push({ header:`${trade} To Pay`, items });
+        }
+        const invoice = [], close = [], lien = [];
+        for (const [job, decision] of assignment.entries()){
+          if (decision.bucket === "Jobs To Invoice") invoice.push(job);
+          else if (decision.bucket === "Jobs To Close") close.push(job);
+          else if (decision.bucket === "Liens Needed") lien.push(job);
+        }
+        invoice.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
+        close.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
+        lien.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
+        columns.push({ header:"Jobs To Invoice", items: invoice });
+        columns.push({ header:"Jobs To Close",   items: close });
+        columns.push({ header:"Liens Needed",    items: lien });
+
+        renderColumns(columns);
+
+        const aoaOut = buildAOA(columns);
+        $download.onclick = () => downloadAOA(aoaOut);
+        $download.disabled = false;
+
+        state = { sheetName, rows, info, jobGroups, assignment, combinedStatus };
+
+        const counts = columns.map(c=>`${c.header}=${c.items.length}`).join(" • ");
+        log(`Computation complete. ${counts}`, "ok");
+      }catch(e){ log(e?.message||String(e), "err"); }
+    });
+
+    /* ----------------- Explain panel ----------- */
+    $inspectBtn.addEventListener('click', ()=>{
+      if (!state){ $inspectOut.textContent = "Run Compute first."; return; }
+      const targets = $inspectInput.value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+      if (!targets.length){ $inspectOut.textContent = "Paste one job per line."; return; }
+
+      const { jobGroups, assignment, info, combinedStatus } = state;
+      const out = [];
+      out.push(`Explain (priority = Trades → Invoice → Close → Lien)`);
+      out.push("");
+
+      for (const job of targets){
+        const recs = jobGroups.get(job);
+        if (!recs){
+          out.push(`• ${job} — NOT FOUND`);
+          out.push("");
+          continue;
+        }
+        const pick = assignment.get(job) || { bucket:null, reason:"(none)" };
+        out.push(`• ${job} — bucket: ${pick.bucket || "(none)"} — reason: ${pick.reason}`);
+        recs.forEach(({r,rowNum}, idx)=>{
+          const title = info.titleIdx>=0 ? safeCell(r[info.titleIdx]) : "";
+          const phase = info.phaseIdx>=0 ? safeCell(r[info.phaseIdx]) : "";
+          const completed = info.completedIdx>=0 ? safeCell(r[info.completedIdx]) : "";
+          const pct = info.percentCompleteIdx>=0 ? safeCell(r[info.percentCompleteIdx]) : "";
+          const statusStr = combinedStatus(r);
+          const flags = [];
+          for (const t of TRADES){
+            const p = info.paidByTrade[t]; const q = info.toPayByTrade[t];
+            if (p>=0 && isFalse(r[p])) flags.push(`Paid ${t}=FALSE`);
+            if (q>=0 && (isTruthy(r[q]) || String(r[q]).trim()!=="")) flags.push(`${t} To Pay=Y`);
+            // NEW: Title pattern signal
+            const pats = TRADE_TITLE_PATTERNS[t] || [];
+            if (info.titleIdx>=0 && pats.some(rx=>rx.test(safeCell(r[info.titleIdx]))) && (info.completedIdx<0 || isFalse(r[info.completedIdx]))){
+              flags.push(`Title→${t} (unpaid)`);
+            }
+          }
+          out.push(`   [row ${rowNum}] title="${title}" | phase="${phase}" | completed=${completed} | percent=${pct} | status="${statusStr}"${flags.length? " | "+flags.join(", ") : ""}`);
+        });
+        out.push("");
       }
+      $inspectOut.textContent = out.join("\n");
+    });
 
-      table.appendChild(thead);
-      table.appendChild(tbody);
-      container.appendChild(table);
+    /* ----------------- header detection -------- */
+    function chooseHeaderRowWithFallback(aoa, scanRows=10){
+      const max = Math.min(scanRows, aoa.length);
+      const scored = [];
+      vlog("Header-row scoring (first up to 10 rows):");
+      for (let r=0; r<max; r++){
+        const row = aoa[r] || [];
+        const s = scoreRowAsHeader(row);
+        const metrics = bannerMetrics(row);
+        vlog(`  row ${r+1}: score=${s.toFixed(3)} • repeatRatio=${metrics.repeatRatio.toFixed(3)} • avgLen=${metrics.avgLen.toFixed(1)}`);
+        scored.push({row:r, score:s, metrics});
+      }
+      scored.sort((a,b)=>b.score-a.score);
+      let best = scored[0] || {row:0, score:0};
+      let reason = `best score=${best.score.toFixed(3)}`;
+      if (best.row === 0 && looksLikeBannerMetrics(best.metrics)) {
+        const alt = scored.find(s => s.row === 1) || {row:1, score:scoreRowAsHeader(aoa[1]||[]), metrics:bannerMetrics(aoa[1]||[])};
+        const delta = best.score - alt.score;
+        if (alt.score > 0 || delta < 0.15) {
+          best = alt; reason = "row 1 looked like a banner → using row 2";
+        }
+      }
+      log(`Auto-picked header row: #${best.row+1} (${reason})`, "ok");
+      return { index: best.row, reason };
+    }
+    function scoreRowAsHeader(row){
+      const vals = (row||[]).map(safeCell);
+      const nonEmpty = vals.filter(t => t.trim()!=="");
+      if (!nonEmpty.length) return -1;
+      const normalized = nonEmpty.map(norm);
+      const uniq = new Set(normalized).size;
+      const uniqScore = uniq / Math.max(1, nonEmpty.length);
+      const hints = ["job","title","phase","notes","percentcomplete","completed","paid","to","pay","topay","siding","painters","columns","trellis","rails","screen","porch","decking","waterproof","louvered","wall","gutters","invoice","lien","close"].map(norm);
+      let hintHits = 0; for (const n of normalized){ if (n.length <= 30 && hints.some(h => n.includes(h))) hintHits++; }
+      const hintScore = hintHits / Math.max(1, nonEmpty.length);
+      const m = bannerMetrics(row);
+      const bannerPenalty = looksLikeBannerMetrics(m) ? (m.repeatRatio - 0.6) * 2.0 : 0;
+      const lengthPenalty = m.avgLen > 35 ? (m.avgLen-35)/50 : 0;
+      return (0.55*hintScore + 0.45*uniqScore) - (bannerPenalty + lengthPenalty);
+    }
+    function bannerMetrics(row){
+      const vals = (row||[]).map(safeCell).filter(t=>t.trim()!=="");
+      if (!vals.length) return { repeatRatio:0, avgLen:0 };
+      const normalized = vals.map(norm);
+      const counts = new Map(); let maxC = 0;
+      for (const n of normalized){ counts.set(n, (counts.get(n)||0)+1); maxC = Math.max(maxC, counts.get(n)); }
+      const repeatRatio = maxC / normalized.length;
+      const avgLen = vals.reduce((a,t)=>a+t.length,0)/vals.length;
+      return { repeatRatio, avgLen };
+    }
+    function looksLikeBannerMetrics(m){ return (m.repeatRatio >= 0.7 && m.avgLen >= 20) || m.avgLen >= 45; }
 
-      if (tableAoA.length - 1 > limit) {
-        const more = document.createElement("div");
-        more.className = "muted";
-        more.textContent = `Showing first ${limit} of ${tableAoA.length - 1} data rows.`;
-        container.appendChild(more);
+    /* ----------------- column detection -------- */
+    function detectColumnsFrom(headerRow){
+      const first = headerRow || [];
+      const keyIdx = findHeader(first, ["job","title","address","lot","project","name"]);
+      const titleIdx = findHeader(first, ["title"], true);
+      const phaseIdx = findHeader(first, ["phase"], true);
+      const allNotesIdx = findHeader(first, ["all notes","notes","internal notes","sub/vendor notes","client notes"], true);
+      const completedIdx = findHeader(first, ["completed"], true);
+      const percentCompleteIdx = findHeader(first, ["percent complete","percentcomplete"], true);
+      const paidByTrade = {}; const toPayByTrade = {};
+      for (const t of TRADES) {
+        const tNorm = norm(t);
+        const paid = findHeader(first, [`paid${tNorm}`, `paid ${tNorm}`, `${tNorm} paid`], true);
+        const toPay = findHeader(first, [`${tNorm} to pay`, `${tNorm}topay`, `${tNorm} pay`, `${tNorm} payable`], true);
+        if (paid >= 0) paidByTrade[t] = paid;
+        if (toPay >= 0) toPayByTrade[t] = toPay;
+      }
+      return { keyIdx: keyIdx>=0 ? keyIdx : 0, titleIdx, phaseIdx, allNotesIdx, completedIdx, percentCompleteIdx, paidByTrade, toPayByTrade };
+    }
+    function findHeader(firstRow, candidates, optional=false){
+      const normRow = firstRow.map(v => norm(v));
+      for (const c of candidates) {
+        const t = norm(c);
+        let idx = normRow.indexOf(t); if (idx !== -1) return idx;
+        idx = normRow.findIndex(h => h.includes(t)); if (idx !== -1) return idx;
+        const parts = t.split(/[^a-z0-9]+/g).filter(Boolean);
+        if (parts.length > 1) { idx = normRow.findIndex(h => parts.every(p=>h.includes(p))); if (idx !== -1) return idx; }
+      }
+      return optional ? -1 : -1;
+    }
+
+    /* ----------------- UI helpers -------------- */
+    function renderColumns(columns){
+      $grid.innerHTML = "";
+      for (const col of columns){
+        const div = document.createElement('div'); div.className = 'col';
+        const hdr = document.createElement('div'); hdr.className = 'hdr';
+        const left = document.createElement('div'); left.textContent = col.header;
+        const right = document.createElement('div'); right.className='muted'; right.textContent = col.items.length;
+        hdr.appendChild(left); hdr.appendChild(right);
+        const list = document.createElement('div'); list.className='list';
+        if (!col.items.length){
+          const span=document.createElement('div'); span.className='muted'; span.textContent='(none)'; list.appendChild(span);
+        } else {
+          for (const item of col.items){ const d = document.createElement('div'); d.className='item'; d.textContent = item; list.appendChild(d); }
+        }
+        div.appendChild(hdr); div.appendChild(list); $grid.appendChild(div);
       }
     }
 
-    // === State ================================================================
-    let sourceWorkbook = null;
-    let processedAoA = null;
-    let sourceSheetName = null;
-
-    const fileInput = document.getElementById("fileInput");
-    const processBtn = document.getElementById("processBtn");
-    const dlXlsxBtn = document.getElementById("dlXlsxBtn");
-    const dlCsvBtn = document.getElementById("dlCsvBtn");
-    const statusEl = document.getElementById("status");
-    const sortColInput = document.getElementById("sortCol");
-
-    // === Handlers =============================================================
-    fileInput.addEventListener("change", async (e) => {
-      resetState();
-      const file = e.target.files && e.target.files[0];
-      if (!file) {
-        statusEl.innerHTML = '<span class="warn">No file selected.</span>';
-        return;
-      }
-
-      try {
-        const data = await file.arrayBuffer();
-        const wb = XLSX.read(data, { type: "array", dense: true });
-        sourceWorkbook = wb;
-        const targetName = wb.SheetNames.includes("Subs to Pay")
-          ? "Subs to Pay"
-          : wb.SheetNames[0];
-        sourceSheetName = targetName;
-
-        statusEl.innerHTML = `<span class="ok">Loaded workbook.</span> Using sheet: <strong>${targetName}</strong>`;
-        processBtn.disabled = false;
-      } catch (err) {
-        statusEl.innerHTML = `<span class="err">Failed to read file: ${err?.message || err}</span>`;
-      }
-    });
-
-    processBtn.addEventListener("click", () => {
-      if (!sourceWorkbook || !sourceSheetName) {
-        statusEl.innerHTML = '<span class="err">No workbook loaded.</span>';
-        return;
-      }
-
-      const ws = sourceWorkbook.Sheets[sourceSheetName];
-      if (!ws) {
-        statusEl.innerHTML = `<span class="err">Sheet "${sourceSheetName}" not found.</span>`;
-        return;
-      }
-
-      const aoaRaw = toArrayOfArrays(ws);
-      if (aoaRaw.length === 0) {
-        statusEl.innerHTML = '<span class="warn">Sheet is empty.</span>';
-        return;
-      }
-
-      // 1) Extract first 15 columns + drop fully blank rows
-      const sliced = aoaRaw
-        .map(row => {
-          const out = new Array(15);
-          for (let i = 0; i < 15; i++) out[i] = row?.[i] ?? "";
-          return out;
-        })
-        .filter(r => r.some(c => String(c ?? "").trim() !== ""));
-
-      if (sliced.length === 0) {
-        statusEl.innerHTML = '<span class="warn">No non-blank rows found.</span>';
-        return;
-      }
-
-      // 2) Detect the most "header-like" row anywhere in the sheet
-      const hdrIdx = detectHeaderRowIndex(sliced, 15);
-      const header = sliced[hdrIdx];
-
-      // 3) Body = all rows except the detected header row
-      let body = sliced.filter((_, i) => i !== hdrIdx);
-
-      // Extra safety: remove any duplicate of the header that might appear again
-      body = body.filter(r => !rowsEqual(r, header));
-
-      // 4) Sort body by chosen column (default 13)
-      const sortCol1Based = Math.max(1, parseInt((sortColInput.value || "13").trim(), 10));
-      const sortIdx = sortCol1Based - 1;
-      const sortedBody = stableSortByColumn(body, sortIdx);
-
-      // 5) Rebuild final AoA (header on top)
-      processedAoA = [header, ...sortedBody];
-
-      // 6) Render preview (hides column A visually)
-      renderPreview(processedAoA);
-
-      // 7) Enable downloads
-      dlXlsxBtn.disabled = false;
-      dlCsvBtn.disabled = false;
-
-      const today = new Date();
-      const stamp = formatMMDDYYYY(today);
-      statusEl.innerHTML = `<span class="ok">Processed.</span> Sheet name will be <strong>Subs to Pay Export ${stamp}</strong>. Rows: ${processedAoA.length - 1}`;
-    });
-
-    dlXlsxBtn.addEventListener("click", () => {
-      if (!processedAoA) {
-        statusEl.innerHTML = '<span class="warn">Nothing to download yet. Process a file first.</span>';
-        return;
-      }
-      const today = new Date();
-      const stamp = formatMMDDYYYY(today);
-      const ws = XLSX.utils.aoa_to_sheet(processedAoA);
-
-      // Hide column A in the Excel export
-      const colCount = processedAoA[0]?.length ?? 15;
-      ws['!cols'] = new Array(colCount).fill(null).map((_, i) => {
-        if (i === 0) return { hidden: true };
-        return {};
-      });
-
+    function buildAOA(columns){
+      const header1=[]; const header2=[];
+      for (const c of columns){ header1.push(c.header); header2.push("Key"); }
+      const maxLen = Math.max(0, ...columns.map(c=>c.items.length));
+      const rows=[]; for (let r=0;r<maxLen;r++){ const line=[]; for (const c of columns){ line.push(c.items[r] || ""); } rows.push(line); }
+      return [header1, header2, ...rows];
+    }
+    function downloadAOA(aoa){
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const colCount = aoa[0]?.length || 0;
+      ws['!cols'] = Array.from({length: colCount}, ()=>({ wch: 26 }));
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, `Subs to Pay Export ${stamp}`);
-      const filename = `Subs to Pay Export ${stamp}.xlsx`;
-      XLSX.writeFile(wb, filename);
-    });
-
-    dlCsvBtn.addEventListener("click", () => {
-      if (!processedAoA) {
-        statusEl.innerHTML = '<span class="warn">Nothing to download yet. Process a file first.</span>';
-        return;
-      }
-      // Keep all columns in CSV (CSV can't hide columns).
-      const ws = XLSX.utils.aoa_to_sheet(processedAoA);
-      const csv = XLSX.utils.sheet_to_csv(ws);
-
-      const today = new Date();
-      const stamp = formatMMDDYYYY(today);
-      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `Subs to Pay Export ${stamp}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      URL.revokeObjectURL(url);
-      a.remove();
-    });
-
-    function resetState() {
-      sourceWorkbook = null;
-      processedAoA = null;
-      sourceSheetName = null;
-      processBtn.disabled = true;
-      dlXlsxBtn.disabled = true;
-      dlCsvBtn.disabled = true;
-      document.getElementById("preview").innerHTML = "";
-      statusEl.textContent = "";
+      XLSX.utils.book_append_sheet(wb, ws, "Who To Pay");
+      XLSX.writeFile(wb, `Who To Pay ${dateStamp()}.xlsx`);
+      log("Excel downloaded.", "ok");
     }
   </script>
 </body>
