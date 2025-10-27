@@ -34,7 +34,7 @@
 </head>
 <body>
   <h1>Who To Pay — Final Outcome</h1>
-  <p class="sub">Each job appears in bucket based on priority: <b>Trades To Pay</b> → <b>Jobs To Invoice</b> → <b>Jobs To Close</b> → <b>Liens Needed</b>. Upload your workbook and click Compute.</p>
+  <p class="sub">Each job appears in a single bucket based on priority: <b>Trades To Pay</b> → <b>Jobs To Invoice</b> → <b>Jobs To Close</b> → <b>Liens Needed</b>. Upload your workbook and click Compute.</p>
 
   <div class="card">
     <div class="row">
@@ -57,7 +57,7 @@
 
   <div class="card">
     <strong>Explain why these should be “Jobs To Invoice”</strong>
-    <div class="note" style="margin:6px 0 10px">Paste job names (one per line), then click <b>Explain</b>. You’ll see all sheet rows for each job, the rule that won, and why other rules lost.</div>
+    <div class="note" style="margin:6px 0 10px">Paste job names (one per line), then click <b>Explain</b>.</div>
     <textarea id="inspectInput" placeholder="e.g.
 610 Walnut
 138 Sullivan Farms
@@ -97,7 +97,7 @@
     /* ----------------- DOM -------------------- */
     const $file = document.getElementById('fileInput');
     const $run = document.getElementById('runBtn');
-       const $download = document.getElementById('downloadBtn');
+    const $download = document.getElementById('downloadBtn');
     const $countBadge = document.getElementById('countBadge');
     const $summary = document.getElementById('summary');
     const $grid = document.getElementById('grid');
@@ -107,19 +107,17 @@
 
     /* ----------------- state ------------------ */
     let workbook = null;
-    let state = null; // rows, info, jobGroups, decision per job, etc.
+    let state = null;
 
     /* ----------------- config ----------------- */
-    const TRADES = ["Painters","Siding","Columns","Trellis","Rails","Screen Porch","Decking","Waterproof","Louvered Wall","Gutters"];
+    const TRADES = ["Painters","Siding","Columns","Trellis","Porch","Decking","Waterproof","Louvered Wall","Gutters"];
 
-    // map trades to loose activity keywords (prove the trade worked on the job)
+    // Keywords proving the trade was actually worked on (loose)
     const TRADE_ACTIVITY_KEYWORDS = {
       "Painters":      ["paint","painter","touch-up","touch up","caulk","prime","stain"],
       "Siding":        ["siding","lap","vinyl","hardie","james hardie","fiber cement"],
       "Columns":       ["column","post","wrap"],
       "Trellis":       ["trellis","pergola"],
-      "Rails":         ["rail","handrail","railing","baluster"],
-      "Screen Porch":  ["screen porch","screening","screen"],
       "Decking":       ["deck","decking","joist","board"],
       "Waterproof":    ["waterproof","water proof","seal","membrane","flashing"],
       "Louvered Wall": ["louver","louvered wall"],
@@ -128,12 +126,10 @@
 
     // “to pay/payment due” patterns (we do not include “Paid …” here)
     const TRADE_DUE_TITLE_PATTERNS = {
-      "Siding":        [/(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b).*(siding)/i, /(siding).*(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b)/i],
+      "Siding":        [/(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b).*(siding|wrap)/i, /(siding|wrap).*(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b)/i],
       "Painters":      [/(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b).*(paint|painter)/i, /(paint|painter).*(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b)/i],
       "Columns":       [/(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b).*(column)/i, /(column).*(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b)/i],
       "Trellis":       [/(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b).*(trellis)/i, /(trellis).*(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b)/i],
-      "Rails":         [/(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b).*(rail)/i, /(rail).*(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b)/i],
-      "Screen Porch":  [/(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b).*(screen\s*porch)/i, /(screen\s*porch).*(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b)/i],
       "Decking":       [/(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b).*(deck)/i, /(deck).*(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b)/i],
       "Waterproof":    [/(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b).*(water\s*proof|waterproof)/i, /(water\s*proof|waterproof).*(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b)/i],
       "Louvered Wall": [/(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b).*(louver(ed)?\s*wall|louver)/i, /(louver(ed)?\s*wall|louver).*(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b)/i],
@@ -146,7 +142,6 @@
 
     /* --------- HOISTED HELPERS --------- */
 
-    // FIX: robust trade token builder (keeps alternation unescaped)
     function reEscape(s){ return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
     function buildTradeTitlePattern(trade){
@@ -155,19 +150,16 @@
       const leadRaw = parts.slice(0, -1);
       const lastRaw = parts[parts.length - 1] || "";
 
-      const leadEsc = leadRaw.map(reEscape).join('\\s*');          // allow flexible spacing between words
+      const leadEsc = leadRaw.map(reEscape).join('\\s*');
       const lastEsc = reEscape(lastRaw);
 
       let lastPattern;
       if (/s$/i.test(lastRaw)) {
-        // e.g., "Painters" -> (Painter|Painters)
         const singularEsc = reEscape(lastRaw.replace(/s$/i, ""));
         lastPattern = `(?:${singularEsc}|${lastEsc})`;
       } else {
-        // e.g., "Rail" -> Rails?
         lastPattern = `${lastEsc}s?`;
       }
-
       return (leadEsc ? leadEsc + '\\s*' : '') + lastPattern;
     }
 
@@ -176,10 +168,38 @@
       return rxList.some(rx => rx.test(t));
     }
 
-    function hasPaidTitleForTrade(trade, records, titleIdx){
+    // Does this job have any "<Trade> Complete/Completed" line that is actually complete? (Completed=TRUE or pct>=100)
+    function hasTradeCompleteSignal(trade, records, info){
+      const token = buildTradeTitlePattern(trade);
+      const completeRx = new RegExp(`${token}[^a-z0-9]*(complete|completed)`, 'i');
+      return records.some(({r})=>{
+        const title = info.titleIdx>=0 ? safeCell(r[info.titleIdx]) : "";
+        const pct   = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
+        const done  = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
+        return completeRx.test(title) && (done || (!isNaN(pct) && pct>=100));
+      });
+    }
+
+    // Do we see a "Paid <Trade>" row? (optionally unfinished)
+    function paidTitlePresent(trade, records, info){
+      if (info.titleIdx < 0) return false;
       const token = buildTradeTitlePattern(trade);
       const paidRx = new RegExp(`\\bpaid\\b[^a-z0-9]*${token}`, 'i');
-      return titleIdx >= 0 && records.some(({r}) => paidRx.test(safeCell(r[titleIdx])));
+      return records.some(({r}) => paidRx.test(safeCell(r[info.titleIdx])));
+    }
+
+    // Is that paid row unfinished? (pct<100 or Completed=FALSE/blank)
+    function paidTitleUnfinished(trade, records, info){
+      if (info.titleIdx < 0) return false;
+      const token = buildTradeTitlePattern(trade);
+      const paidRx = new RegExp(`\\bpaid\\b[^a-z0-9]*${token}`, 'i');
+      return records.some(({r})=>{
+        const title = safeCell(r[info.titleIdx]);
+        if (!paidRx.test(title)) return false;
+        const pct = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
+        const done = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
+        return (!done) && (isNaN(pct) || pct < 100);
+      });
     }
 
     function hasTradeActivity(trade, records, info){
@@ -195,49 +215,29 @@
       });
     }
 
-    // Accept “to pay/payment due” phrasing OR “Paid {Trade} …” (strict unfinished) + activity
+    // NEW: Title-driven To-Pay logic with “Paid … (0%) but no <Trade> Complete anywhere” exception
     function titleIndicatesTradeToPay(trade, records, info){
       if (info.titleIdx < 0) return false;
 
-      // (A) explicit “to pay/payment due” phrasing
+      // (A) explicit “to pay/payment due” phrasing on an unfinished row
       const pats = TRADE_DUE_TITLE_PATTERNS[trade] || [];
       const payDue = records.some(({ r }) => {
         const title = safeCell(r[info.titleIdx]);
-        const hasCompletedCol = info.completedIdx >= 0;
-        const completedRaw = hasCompletedCol ? r[info.completedIdx] : "";
-        const pct = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
-
-        let unfinished = false;
-        if (hasCompletedCol) {
-          if (isFalse(completedRaw)) unfinished = true;
-          else if (String(completedRaw).trim() === "") {
-            unfinished = (isNaN(pct) || pct < 100);
-          }
-        } else {
-          unfinished = (isNaN(pct) || pct < 100);
-        }
+        const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+        const done  = info.completedIdx      >= 0 ? isTruthy(r[info.completedIdx])     : false;
+        const unfinished = (!done) && (isNaN(pct) || pct < 100);
         return unfinished && titleMatchesAny(pats, title);
       });
       if (payDue) return true;
 
-      // (B) “Paid {Trade} …” with strict unfinished rule + activity evidence
-      const token = buildTradeTitlePattern(trade);
-      const paidRx = new RegExp(`\\bpaid\\b[^a-z0-9]*${token}`, 'i');
-      const hasUnfinishedPaidTitle = records.some(({r})=>{
-        if (info.titleIdx < 0) return false;
-        const title = safeCell(r[info.titleIdx]);
-        if (!paidRx.test(title)) return false;
-
-        const completedRaw = info.completedIdx>=0 ? r[info.completedIdx] : "";
-        const pct = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
-
-        if (isFalse(completedRaw)) return true;
-        if (!isNaN(pct)) return pct < 100;           // must be <100 to be unfinished
-        if (String(completedRaw).trim() === "") return true; // no percent -> blank completed counts as unfinished
-        return false;
-      });
-
-      if (hasUnfinishedPaidTitle && hasTradeActivity(trade, records, info)) return true;
+      // (B) “Paid <Trade>” present but unfinished → counts as To Pay
+      //     ONLY when there is NO "<Trade> Complete/Completed" line anywhere in this job.
+      if (paidTitlePresent(trade, records, info) &&
+          paidTitleUnfinished(trade, records, info) &&
+          !hasTradeCompleteSignal(trade, records, info) &&
+          hasTradeActivity(trade, records, info)) {
+        return true;
+      }
 
       return false;
     }
@@ -279,7 +279,7 @@
         dumpRow(`Chosen header row ${pick.index+1} (raw)`, headers, 30);
         dumpRow(`Chosen header row ${pick.index+1} (normalized)`, headers.map(norm), 30);
 
-        const info = detectColumnsFrom(headers); // Job-aware & Phase-aware
+        const info = detectColumnsFrom(headers);
         info.headerRowIndex = pick.index; info.headerReason = pick.reason;
 
         const mapLines = [];
@@ -299,7 +299,6 @@
         const rows = aoa.slice(pick.index + 1);
         $countBadge.textContent = `${rows.length} rows`;
 
-        // Build combined status helper
         const combinedStatus = (r)=>{
           const parts = [];
           if (info.phaseIdx>=0) parts.push(safeCell(r[info.phaseIdx]));
@@ -308,19 +307,19 @@
           return parts.filter(Boolean).join(" | ");
         };
 
-        // -------- group rows by Job key --------
+        // Group rows by job
         const jobGroups = new Map();
         const keyIdx = info.keyIdx;
         rows.forEach((r, i)=>{
           const job = String(r[keyIdx]||"").trim();
           if (!job) return;
           const list = jobGroups.get(job) || [];
-          list.push({ r, rowNum: i + (pick.index+2) }); // 1-based + header
+          list.push({ r, rowNum: i + (pick.index+2) });
           jobGroups.set(job, list);
         });
         log(`Grouped into ${jobGroups.size} unique jobs.`, "ok");
 
-        // --------------- decision engine ---------------
+        // Decision engine
         function decideForJob(job, records){
 
           // collect trade hits (explicit columns or titles)
@@ -339,16 +338,14 @@
               continue;
             }
 
-            // (b) Titles: “to pay/payment due” OR “Paid {Trade} …” (strict unfinished) + activity
+            // (b) Titles (with the balanced “Paid … (0%) unless <Trade> Complete exists” rule)
             if (titleIndicatesTradeToPay(trade, records, info)){
               let minPct = 1000;
               for (const { r } of records){
                 const title = info.titleIdx>=0 ? safeCell(r[info.titleIdx]) : "";
                 const pct = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
-                const token = buildTradeTitlePattern(trade);
-                const isPaidTitle = new RegExp(`\\bpaid\\b[^a-z0-9]*${token}`,'i').test(title);
                 const pats = TRADE_DUE_TITLE_PATTERNS[trade] || [];
-                if (isPaidTitle || titleMatchesAny(pats, title)){
+                if (titleMatchesAny(pats, title)){
                   if (!isNaN(pct)) minPct = Math.min(minPct, pct); else minPct = Math.min(minPct, 999);
                 }
               }
@@ -357,17 +354,22 @@
           }
 
           if (hits.length){
-            // lower percent complete wins (more “urgent”)
             hits.sort((a,b) => a.tiePct - b.tiePct);
             const pick = hits[0];
             return { bucket: `${pick.trade} To Pay`, reason: pick.why, trade: pick.trade, extra: null };
           }
 
-          // Guard: if any row says "100% Job Complete", don't place into Invoice
-          const has100Complete = records.some(({r}) => contains(combinedStatus(r), "100% job complete"));
+          // Guard: block Invoice only when a “100% Job Complete” row is actually complete
+          const hasBlocking100Complete = records.some(({r}) => {
+            const phrasePresent = contains(combinedStatus(r), "100% job complete");
+            if (!phrasePresent) return false;
+            const pct = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
+            const completedTruth = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
+            return completedTruth || (!isNaN(pct) && pct >= 100);
+          });
 
-          // PRIORITY 2: Invoice (ignored when 100% complete is present)
-          if (!has100Complete && records.some(({r}) => anyContains(combinedStatus(r), PHRASES_INVOICE))){
+          // PRIORITY 2: Invoice
+          if (!hasBlocking100Complete && records.some(({r}) => anyContains(combinedStatus(r), PHRASES_INVOICE))){
             const rec = records.find(({r}) => anyContains(combinedStatus(r), PHRASES_INVOICE));
             const phrase = PHRASES_INVOICE.find(p => contains(combinedStatus(rec.r), p));
             return { bucket:"Jobs To Invoice", reason:`contains “${phrase}” in ${combinedStatus(rec.r)}`, trade:null, extra:null };
@@ -395,13 +397,12 @@
         }
 
         // assign jobs
-        const assignment = new Map(); // job -> {bucket, reason}
+        const assignment = new Map();
         for (const [job, records] of jobGroups.entries()){
-          const decision = decideForJob(job, records);
-          assignment.set(job, decision);
+          assignment.set(job, decideForJob(job, records));
         }
 
-        // -------- build columns from assignment --------
+        // build columns from assignment
         const columns = [];
         for (const trade of TRADES){
           const items = [];
@@ -473,16 +474,12 @@
               flags.push(`Title→${t} (to pay)`);
             }
 
-            // Show “Paid-title counted …” only when it meets the strict unfinished rule
             const token = buildTradeTitlePattern(t);
             const paidRx = new RegExp(`\\bpaid\\b[^a-z0-9]*${token}`,'i');
             if (paidRx.test(title)) {
-              const cRaw = info.completedIdx>=0 ? r[info.completedIdx] : "";
-              const pNum = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
-              const counted = (isFalse(cRaw)) || (!isNaN(pNum) ? (pNum<100) : (String(cRaw).trim()==""));
-              if (counted && hasTradeActivity(t, [{r}], info)) {
-                flags.push("Paid-title counted as To Pay (unfinished + activity)");
-              }
+              const pctN = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
+              const doneN = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
+              flags.push(`Paid-title present (pct=${isNaN(pctN)?"":pctN}, completed=${doneN})`);
             }
           }
           out.push(`   [row ${rowNum}] title="${title}" | phase="${phase}" | completed=${completed} | percent=${pct} | status="${statusStr}"${flags.length? " | "+flags.join(", ") : ""}`);
@@ -525,7 +522,7 @@
       const normalized = nonEmpty.map(norm);
       const uniq = new Set(normalized).size;
       const uniqScore = uniq / Math.max(1, nonEmpty.length);
-      const hints = ["job","title","phase","notes","percentcomplete","completed","paid","to","pay","topay","siding","painters","columns","trellis","rails","screen","porch","decking","waterproof","louvered","wall","gutters","invoice","lien","close"].map(norm);
+      const hints = ["job","title","phase","notes","percentcomplete","completed","paid","to","pay","topay","siding","painters","columns","trellis","screen","porch","decking","waterproof","louvered","wall","gutters","invoice","lien","close"].map(norm);
       let hintHits = 0; for (const n of normalized){ if (n.length <= 30 && hints.some(h => n.includes(h))) hintHits++; }
       const hintScore = hintHits / Math.max(1, nonEmpty.length);
       const m = bannerMetrics(row);
