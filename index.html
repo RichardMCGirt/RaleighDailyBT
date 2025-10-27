@@ -110,7 +110,7 @@
     let state = null; // rows, info, jobGroups, decision per job, etc.
 
     /* ----------------- config ----------------- */
-    const TRADES = ["Siding","Painters","Columns","Trellis","Rails","Screen Porch","Decking","Waterproof","Louvered Wall","Gutters"];
+const TRADES = ["Painters","Siding","Columns","Trellis","Rails","Screen Porch","Decking","Waterproof","Louvered Wall","Gutters"];
 
     // Patterns for row-based trade detection (Title text)
     const TRADE_TITLE_PATTERNS = {
@@ -208,60 +208,109 @@
         log(`Grouped into ${jobGroups.size} unique jobs.`, "ok");
 
         // -------- helper: match trade by Title + Completed(FALSE) --------
-        function titleIndicatesUnpaidTrade(trade, records){
-          const pats = TRADE_TITLE_PATTERNS[trade] || [];
-          if (!pats.length || info.titleIdx < 0) return false;
-          return records.some(({r})=>{
-            const title = safeCell(r[info.titleIdx]);
-            const unpaid = (info.completedIdx>=0) ? isFalse(r[info.completedIdx]) : true; // if no Completed col, assume unpaid
-            return unpaid && pats.some(rx => rx.test(title));
-          });
+        // Keep your existing TRADE_TITLE_PATTERNS as-is
+
+// Replace the helper with this refined logic:
+function titleIndicatesUnpaidTrade(trade, records){
+  const pats = TRADE_TITLE_PATTERNS[trade] || [];
+  if (!pats.length || info.titleIdx < 0) return false;
+
+  return records.some(({ r }) => {
+    const title = safeCell(r[info.titleIdx]);
+    const hasCompletedCol = info.completedIdx >= 0;
+    const completedRaw = hasCompletedCol ? r[info.completedIdx] : "";
+    const pct = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+
+    // When Completed column exists:
+    // - Explicit FALSE/0/no  -> unpaid
+    // - Blank + pct < 100    -> unpaid
+    // - Blank + pct >= 100   -> done (don’t count as unpaid)
+    let unpaid = false;
+    if (hasCompletedCol) {
+      if (isFalse(completedRaw)) unpaid = true;
+      else if (String(completedRaw).trim() === "") {
+        if (isNaN(pct) || pct < 100) unpaid = true;
+      }
+    } else {
+      // No Completed column; use percent as proxy
+      unpaid = (isNaN(pct) || pct < 100);
+    }
+
+    const titleMatches = pats.some(rx => rx.test(title));
+    return titleMatches && unpaid;
+  });
+}
+
+// Add a trade collector above the current "return on first hit" logic:
+function decideForJob(job, records){
+  // Collect all trade hits instead of returning immediately
+  const hits = [];
+
+  for (const trade of TRADES){
+    const paidIdx = info.paidByTrade[trade] ?? -1;
+    const toPayIdx = info.toPayByTrade[trade] ?? -1;
+
+    // (a) explicit columns win immediately
+    if (paidIdx >= 0 && records.some(({r}) => isFalse(r[paidIdx]))){
+      hits.push({ trade, why: `Paid ${trade} = FALSE`, tiePct: 0 });
+      continue;
+    }
+    if (toPayIdx >= 0 && records.some(({r}) => isTruthy(r[toPayIdx]) || String(r[toPayIdx]).trim()!=="")){
+      hits.push({ trade, why: `${trade} To Pay marked`, tiePct: 0 });
+      continue;
+    }
+
+    // (b) Title pattern + unpaid
+    if (titleIndicatesUnpaidTrade(trade, records)){
+      // Use the smallest percentComplete among matching rows as a tiebreaker
+      let minPct = 1000;
+      for (const { r } of records){
+        const title = info.titleIdx>=0 ? safeCell(r[info.titleIdx]) : "";
+        const pats = TRADE_TITLE_PATTERNS[trade] || [];
+        if (pats.some(rx => rx.test(title))){
+          const pct = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
+          if (!isNaN(pct)) minPct = Math.min(minPct, pct);
+          else minPct = Math.min(minPct, 999); // unknown pct -> treat as more "open"
         }
+      }
+      hits.push({ trade, why: `Title indicates “Paid ${trade} …” with Completed = FALSE/blank`, tiePct: isFinite(minPct) ? minPct : 999 });
+    }
+  }
 
-        // -------- decide single bucket per job (priority) --------
-        const decideForJob = (job, records)=>{
-          // PRIORITY 1: Trades to pay
-          for (const trade of TRADES){
-            const paidIdx = info.paidByTrade[trade] ?? -1;
-            const toPayIdx = info.toPayByTrade[trade] ?? -1;
+  // If we found trade hits, pick the one that looks least finished (lowest percentComplete)
+  if (hits.length){
+    hits.sort((a,b) => a.tiePct - b.tiePct); // prefer lower pct
+    const pick = hits[0];
+    return { bucket: `${pick.trade} To Pay`, reason: pick.why, trade: pick.trade, extra: null };
+  }
 
-            // (a) explicit columns
-            if (paidIdx >= 0 && records.some(({r}) => isFalse(r[paidIdx]))){
-              return { bucket:`${trade} To Pay`, reason:`Paid ${trade} = FALSE`, trade, extra:null };
-            }
-            if (toPayIdx >= 0 && records.some(({r}) => isTruthy(r[toPayIdx]) || String(r[toPayIdx]).trim()!=="")){
-              return { bucket:`${trade} To Pay`, reason:`${trade} To Pay marked`, trade, extra:null };
-            }
-            // (b) NEW: Title-based pattern e.g. "Paid Siding Sub" + Completed FALSE
-            if (titleIndicatesUnpaidTrade(trade, records)){
-              return { bucket:`${trade} To Pay`, reason:`Title indicates “Paid ${trade} …” with Completed = FALSE`, trade, extra:null };
-            }
-          }
-          // PRIORITY 2: Invoice
-          if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_INVOICE))){
-            const rec = records.find(({r}) => anyContains(combinedStatus(r), PHRASES_INVOICE));
-            const phrase = PHRASES_INVOICE.find(p => contains(combinedStatus(rec.r), p));
-            return { bucket:"Jobs To Invoice", reason:`contains “${phrase}” in ${combinedStatus(rec.r)}`, trade:null, extra:null };
-          }
-          // PRIORITY 3: Close
-          if (info.completedIdx>=0 && records.some(({r}) => isTruthy(r[info.completedIdx]))){
-            return { bucket:"Jobs To Close", reason:"Completed = TRUE", trade:null, extra:null };
-          }
-          if (info.percentCompleteIdx>=0 && records.some(({r}) => Number(r[info.percentCompleteIdx])>=100)){
-            return { bucket:"Jobs To Close", reason:"PercentComplete ≥ 100", trade:null, extra:null };
-          }
-          if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_CLOSE))){
-            const rec = records.find(({r}) => anyContains(combinedStatus(r), PHRASES_CLOSE));
-            const phrase = PHRASES_CLOSE.find(p => contains(combinedStatus(rec.r), p));
-            return { bucket:"Jobs To Close", reason:`contains “${phrase}”`, trade:null, extra:null };
-          }
-          // PRIORITY 4: Liens
-          if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_LIEN))){
-            return { bucket:"Liens Needed", reason:"lien phrase found", trade:null, extra:null };
-          }
-          // nothing matches
-          return { bucket:null, reason:"no rules matched", trade:null, extra:null };
-        };
+  // PRIORITY 2: Invoice
+  if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_INVOICE))){
+    const rec = records.find(({r}) => anyContains(combinedStatus(r), PHRASES_INVOICE));
+    const phrase = PHRASES_INVOICE.find(p => contains(combinedStatus(rec.r), p));
+    return { bucket:"Jobs To Invoice", reason:`contains “${phrase}” in ${combinedStatus(rec.r)}`, trade:null, extra:null };
+  }
+
+  // PRIORITY 3: Close
+  if (info.completedIdx>=0 && records.some(({r}) => isTruthy(r[info.completedIdx]))){
+    return { bucket:"Jobs To Close", reason:"Completed = TRUE", trade:null, extra:null };
+  }
+  if (info.percentCompleteIdx>=0 && records.some(({r}) => Number(r[info.percentCompleteIdx])>=100)){
+    return { bucket:"Jobs To Close", reason:"PercentComplete ≥ 100", trade:null, extra:null };
+  }
+  if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_CLOSE))){
+    const rec = records.find(({r}) => anyContains(combinedStatus(r), PHRASES_CLOSE));
+    const phrase = PHRASES_CLOSE.find(p => contains(combinedStatus(rec.r), p));
+    return { bucket:"Jobs To Close", reason:`contains “${phrase}”`, trade:null, extra:null };
+  }
+
+  // PRIORITY 4: Liens
+  if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_LIEN))){
+    return { bucket:"Liens Needed", reason:"lien phrase found", trade:null, extra:null };
+  }
+
+  return { bucket:null, reason:"no rules matched", trade:null, extra:null };
+}
 
         // assign jobs
         const assignment = new Map(); // job -> {bucket, reason}
