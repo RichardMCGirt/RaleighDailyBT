@@ -1,0 +1,25 @@
+  :root { --border:#e6e8ef; --muted:#6b7280; --accent:#3b5bff; --bg:#f8faff; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin:24px; color:#0f172a; }
+    h1 { margin:0 0 8px; }
+    .sub { margin:0 0 16px; color:var(--muted); }
+    .card { border:1px solid var(--border); border-radius:12px; padding:16px; background:#fff; margin-bottom:14px; }
+    input[type=file]{ padding:10px; border:1px dashed #cfd3e3; border-radius:10px; background:#f8faff; width:100%; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    button { padding:10px 14px; cursor:pointer; border-radius:8px; border:1px solid #cfd3e3; background:#f7f8ff; }
+    button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .pill { font-size:11px; padding:2px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; }
+    .note { font-size:12px; color:#6b7280; margin-top:6px; }
+    .log { white-space:pre-wrap; background:#0b1020; color:#dbe4ff; padding:12px; border-radius:10px; min-height:160px; max-height:44vh; overflow:auto; }
+    .ok { color:#14b8a6; }
+    .err{ color:#ef4444; }
+
+    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; align-items:start; }
+    .col { border:1px solid var(--border); border-radius:10px; overflow:hidden; background:#fff; }
+    .col .hdr { font-weight:700; padding:8px 10px; background:#f1f5ff; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
+    .col .list { padding:8px 10px; max-height:50vh; overflow:auto; line-height:1.5; font-size:14px; }
+    .muted { color:#6b7280; }
+    .item + .item { margin-top:4px; }
+
+    textarea { width:100%; min-height:120px; padding:8px; border:1px solid var(--border); border-radius:10px; background:#fcfcfe; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .explain { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:13px; white-space:pre-wrap; background:#0b1020; color:#dbe4ff; padding:12px; border-radius:10px; }
