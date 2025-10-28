@@ -537,6 +537,10 @@ $inspectBtn.addEventListener('click', ()=>{
   if (!state){ $inspectOut.textContent = "Run Compute first."; return; }
   const targets = $inspectInput.value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
   if (!targets.length){ $inspectOut.textContent = "Paste one job per line."; return; }
+// when building the per-row flags for Explain:
+if (hasFinalCompletePresentButNotDone([{ r }], info)) {
+  flags.push('“100% Job Complete” present but not completed → suppress from Jobs To Invoice');
+}
 
   const { jobGroups, assignment, info, combinedStatus } = state;
   const out = [];
@@ -583,6 +587,33 @@ $inspectBtn.addEventListener('click', ()=>{
   }
   $inspectOut.textContent = out.join("\n");
 });
+// --- NEW helpers (place near your other helpers) ---
+function isFinalCompleteRow(title){
+  const t = String(title || "").toLowerCase();
+  // cover common variants; adjust as needed
+  return t.includes("100% job complete") || t.includes("100% complete");
+}
+
+function hasFinalCompleteDone(records, info){
+  // true only if there exists a "100% Job Complete" row AND it's actually complete
+  return Array.isArray(records) && records.some(({ r }) => {
+    const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
+    const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+    const done  = Boolean(r[info.completedIdx]); // if you track a boolean "completed" column
+    return isFinalCompleteRow(title) && (done === true || (!Number.isNaN(pct) && pct >= 100));
+  });
+}
+
+function hasFinalCompletePresentButNotDone(records, info){
+  // exists a "100% Job Complete" row but it's not complete
+  return Array.isArray(records) && records.some(({ r }) => {
+    const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
+    if (!isFinalCompleteRow(title)) return false;
+    const pct  = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+    const done = Boolean(r[info.completedIdx]);
+    return !(done === true || (!Number.isNaN(pct) && pct >= 100));
+  });
+}
 
 /* ----------------- header detection -------- */
 function chooseHeaderRowWithFallback(aoa, scanRows=10){
