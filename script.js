@@ -113,34 +113,64 @@ function hasTradeWorkComplete(trade, records, info, tokens){
 
 
 function findUnpaidTrade(records, info){
-  const rows = records.map(({r}) => ({ r, s: textOf(r, info) }));
+  // rows flattened to searchable strings
+  const rows = records.map(({ r }) => ({ r, s: textOf(r, info) }));
 
-  for (const [trade, tokens] of Object.entries(TRADE_GROUPS)){
-    if (IGNORED_TRADES.has(trade)) continue;
+  // close-out completion is a global guard you already use
+  const closeOutDone = hasAnyCloseOutComplete(records, info);
 
-    const tradeComplete = hasTradeWorkComplete(trade, records, info, tokens);
-    const closeOutDone  = hasAnyCloseOutComplete(records, info);
+  // Iterate over **pretty** trade labels (e.g., "Screen Porch")
+  // TRADES: { "Screen Porch": [...tokens], "Porch": [...], ... }
+ for (const prettyLabel of TRADES) {
+  const tradeKey = prettyLabel.toLowerCase();
+  if (IGNORED_TRADES.has(tradeKey)) continue;
 
-    const paidRows       = rows.filter(x => x.s.includes("paid") && tokens.some(t => x.s.includes(t)));
+  // ✅ get correct tokens for this pretty label
+  const tokens = tokensFor(prettyLabel);
+
+    // Your completion check should accept the lower-case key and the tokens for this trade
+const tradeComplete  = hasTradeCompleteSignal(trade, records, info);
+
+    // Find "Paid ..." rows that also mention this trade (via its tokens)
+    const paidRows = rows.filter(x =>
+      x.s.includes("paid") && tokens.some(t => x.s.includes(t))
+    );
+
     const anyPaidPending = paidRows.some(x => !rowIsCompleted(x.r, info));
     const anyPaidDone    = paidRows.some(x =>  rowIsCompleted(x.r, info));
 
-    // NEW: Porch/Screen Porch must be COMPLETE to consider To-Pay
-    const requireTradeComplete = STRICT_COMPLETION_TRADES.has(trade);
+    // Trades that must be COMPLETE before they can be considered "To Pay"
+    const requireTradeComplete = STRICT_COMPLETION_TRADES.has(tradeKey);
 
-  if (
-  anyPaidPending &&
-  !anyPaidDone && // ← NEW: mixed paid states collapse to “not To Pay”
-  (requireTradeComplete ? tradeComplete : (tradeComplete || closeOutDone))
-){
-  return { trade, reason: `Title→${capitalize(trade)} (to pay), Paid-title present (unfinished)` };
-}
-    if (tradeComplete && !anyPaidDone){
-      return { trade, reason: `${capitalize(trade)} complete without payment` };
+    // If we have an unfinished "Paid ..." row for this trade (and none finished),
+    // and the appropriate completion guard is satisfied, return the **pretty** bucket label.
+    if (
+      anyPaidPending &&
+      !anyPaidDone && // collapse mixed states to "not To Pay"
+      (requireTradeComplete ? tradeComplete : (tradeComplete || closeOutDone))
+    ) {
+      return {
+        trade: tradeKey,
+        bucket: `${prettyLabel} To Pay`, // ← matches your column header exactly
+        reason: `Title→${prettyLabel} (to pay), Paid-title present (unfinished)`
+      };
+    }
+
+    // If the trade work is complete but there is no finished "Paid ..." row yet,
+    // this is also a To-Pay scenario for that trade.
+    if (tradeComplete && !anyPaidDone) {
+      return {
+        trade: tradeKey,
+        bucket: `${prettyLabel} To Pay`, // ← use pretty label for exact match
+        reason: `${prettyLabel} complete without payment`
+      };
     }
   }
+
+  // Nothing qualifies
   return null;
 }
+
 
 
 // Keywords proving the trade was actually worked on (loose)
@@ -264,10 +294,6 @@ function hasTradeActivity(trade, records, info){
   });
 }
 
-// NEW: Title-driven To-Pay logic with “Paid … (0%) but no <Trade> Complete anywhere” exception
-// Title-driven To-Pay logic, with stricter requirement for some trades:
-// - For STRICT_COMPLETION_TRADES (Porch, Screen Porch): require the trade itself be complete.
-// - For others: allow either the trade complete OR a generic close-out complete.
 function titleIndicatesTradeToPay(trade, records, info, tokens){
   if (IGNORED_TRADES.has(trade)) return false;
 
@@ -276,7 +302,7 @@ function titleIndicatesTradeToPay(trade, records, info, tokens){
   const anyPaidPending = paidRows.some(x => !rowIsCompleted(x.r, info));
   const anyPaidDone    = paidRows.some(x =>  rowIsCompleted(x.r, info));
 
-  const tradeComplete  = hasTradeWorkComplete(trade, records, info, tokens);
+const tradeComplete  = hasTradeCompleteSignal(trade, records, info);
   const closeOutDone   = hasAnyCloseOutComplete(records, info);
 
   // NEW: Porch/Screen Porch must be COMPLETE to consider "To Pay"
@@ -473,7 +499,8 @@ function decideForJob(job, records){
     const anyTrueUnpaidFinishedTrade = TRADES.some(trade => {
       if (IGNORED_TRADES.has(trade)) return false;
       const tokens = tokensFor(trade);
-      const tradeComplete = hasTradeWorkComplete(trade, records, info, tokens);
+      // use the same completion semantics as Explain (Completed=TRUE OR %≥100)
+      const tradeComplete = hasTradeCompleteSignal(trade, records, info);
       if (!tradeComplete) return false;
       const anyPaidDone = paidTitlePresent(trade, records, info) && !paidTitleUnfinished(trade, records, info);
       return !anyPaidDone;
@@ -485,22 +512,33 @@ function decideForJob(job, records){
   }
   // ======= END INVOICE OVERRIDE =======
 
-  // ======= STRICT TRADE GUARD (Porch / Screen Porch) =======
-  // If the strict-completion trade is complete but its "Paid ..." row is unfinished → force To Pay.
-  for (const strictTrade of STRICT_COMPLETION_TRADES){
-    const tokens = tokensFor(strictTrade);
-    const tradeComplete = hasTradeWorkComplete(strictTrade, records, info, tokens);
-    const paidUnfinished = paidTitleUnfinished(strictTrade, records, info);
-    const paidPresent = paidTitlePresent(strictTrade, records, info);
-    const paidDone = paidPresent && !paidUnfinished;
+  // ======= STRICT TRADE GUARD with deterministic priority =======
+  // Prefer Screen Porch over Porch, and if job is fully complete, also flag Jobs To Close.
+  const STRICT_ORDER = ["Screen Porch","Porch"]; // deterministic priority
+  // helper: is the whole job effectively complete?
+  const fullyComplete = records.some(({r})=>{
+    const title = safeCell(r[info.titleIdx]||"").toLowerCase();
+    const pct   = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
+    const done  = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
+    const isFinal = title.includes("100% job complete") || title.includes("job complete/inspected");
+    return isFinal && (done || (!isNaN(pct) && pct>=100));
+  });
+
+  for (const strictPretty of STRICT_ORDER){
+    const strictTrade = strictPretty; // keep pretty label for messages
+    // Completion semantics consistent with Explain:
+    const tradeComplete   = hasTradeCompleteSignal(strictTrade, records, info);
+    const paidUnfinished  = paidTitleUnfinished(strictTrade, records, info);
+    const paidPresent     = paidTitlePresent(strictTrade, records, info);
+    const paidDone        = paidPresent && !paidUnfinished;
 
     if (tradeComplete && !paidDone){
-      return {
-        bucket: `${capitalize(strictTrade)} To Pay`,
-        reason: `${capitalize(strictTrade)} complete but Paid ${capitalize(strictTrade)} is false/unfinished`,
-        trade: strictTrade,
-        extra: null
-      };
+      const base = `${strictTrade} To Pay`;
+      const bucket = fullyComplete ? `${base} + Jobs To Close` : base;
+      const reason = fullyComplete
+        ? `${strictTrade} complete, unpaid, and job fully complete`
+        : `${strictTrade} complete but Paid ${strictTrade} is false/unfinished`;
+      return { bucket, reason, trade: strictTrade.toLowerCase(), extra: null };
     }
   }
   // ======= END STRICT TRADE GUARD =======
@@ -555,8 +593,6 @@ function decideForJob(job, records){
 }
 
 
-
-    // assign jobs
   // assign jobs
 const assignment = new Map();
 for (const [job, records] of jobGroups.entries()){
@@ -564,29 +600,36 @@ for (const [job, records] of jobGroups.entries()){
   assignment.set(job, pick);
 }
 
+// build columns from assignment
+const columns = [];
 
-    // build columns from assignment
-    const columns = [];
-    for (const trade of TRADES){
-      const items = [];
-      for (const [job, decision] of assignment.entries()){
-        if (decision.bucket === `${trade} To Pay`) items.push(job);
-      }
-      if (items.length) items.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
-      columns.push({ header:`${trade} To Pay`, items });
-    }
-    const invoice = [], close = [], lien = [];
-    for (const [job, decision] of assignment.entries()){
-      if (decision.bucket === "Jobs To Invoice") invoice.push(job);
-      else if (decision.bucket === "Jobs To Close") close.push(job);
-      else if (decision.bucket === "Liens Needed") lien.push(job);
-    }
-    invoice.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
-    close.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
-    lien.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
-    columns.push({ header:"Jobs To Invoice", items: invoice });
-    columns.push({ header:"Jobs To Close",   items: close });
-    columns.push({ header:"Liens Needed",    items: lien });
+// Per-trade "To Pay" columns — allow multi-bucket by using .includes(...)
+for (const trade of TRADES){
+  const items = [];
+  for (const [job, decision] of assignment.entries()){
+    const b = decision.bucket || "";
+    if (b.includes(`${trade} To Pay`)) items.push(job);
+  }
+  if (items.length) items.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
+  columns.push({ header:`${trade} To Pay`, items });
+}
+
+// Global buckets — also use .includes(...) to catch multi-bucket labels
+const invoice = [], close = [], lien = [];
+for (const [job, decision] of assignment.entries()){
+  const b = decision.bucket || "";
+  if (b.includes("Jobs To Invoice")) invoice.push(job);
+  if (b.includes("Jobs To Close"))   close.push(job);
+  if (b.includes("Liens Needed"))    lien.push(job);
+}
+
+invoice.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
+close.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
+lien.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
+columns.push({ header:"Jobs To Invoice", items: invoice });
+columns.push({ header:"Jobs To Close",   items: close });
+columns.push({ header:"Liens Needed",    items: lien });
+
 
     renderColumns(columns);
 
