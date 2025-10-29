@@ -316,13 +316,17 @@ const closeOutSoft   = hasAnyCloseOutSoft(records, info);
   const requireTradeComplete = STRICT_COMPLETION_TRADES.has(trade);
 
   // Rule 1: unpaid "Paid <Trade>" only counts if completion context satisfied
- if (
-  anyPaidPending &&
-  !anyPaidDone && // ← NEW: don't flag To Pay if another Paid row is already DONE for this trade family
-(requireTradeComplete ? tradeComplete : (tradeComplete || closeOutDone || closeOutSoft))
-){
-  return true;
+// For most trades, an unfinished "Paid <Trade>" is enough to surface To Pay.
+// Porch/Screen Porch still require actual completion.
+if (anyPaidPending && !anyPaidDone) {
+  if (requireTradeComplete) {
+    if (tradeComplete) return true; // strict trades
+  } else {
+    return true; // non-strict trades (e.g., Siding) – no completion context required
+  }
 }
+vlog(`[ToPay <- PaidPending] ${trade} (strict=${requireTradeComplete})`);
+
 
   // Rule 2: trade completed but no completed payment yet
   if (tradeComplete && !anyPaidDone){
@@ -505,6 +509,8 @@ vlog(`[PENDING_FINAL] present=${hasFinalCompletePresentButNotDone(records, info)
     const completedTruth = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
     return completedTruth || (!isNaN(pct) && pct >= 100);
   });
+const finalDone = hasFinalCompleteDone(records, info);
+const invoicePending = invoicedPresent && !invoicedDone;
 
  // --- Build potential Trade "To Pay" hits (explicit cols or titles)
 const hits = [];
@@ -581,7 +587,6 @@ vlog(`[PENDING_FINAL] present=${hasFinalCompletePresentButNotDone(records, info)
    // If it's a "fake 100%" (present but not actually done) AND there is no trade to pay and no lien,
 // suppress — UNLESS invoice is pending AND job is actually complete AND no finished trade is unpaid.
 if (!anyTradeToPay && !anyLien) {
-  const invoicePending = invoicedPresent && !invoicedDone;
 
   // family-aware: count waterproof deck as Decking payment, etc.
   const finishedTradesUnpaid = TRADES.some(pretty => {
@@ -594,7 +599,6 @@ if (!anyTradeToPay && !anyLien) {
   });
 
   // job truly complete (100% or Completed=TRUE on a final line)
-  const finalDone = hasFinalCompleteDone(records, info);
 
   if (invoicePending && finalDone && !finishedTradesUnpaid) {
     // Do NOT suppress; let invoice logic pick it up later.
@@ -604,6 +608,7 @@ if (!anyTradeToPay && !anyLien) {
 }}
 
 // Completed & all finished trades paid, but invoice is pending → Jobs To Invoice
+// Replace the existing block
 if (invoicedPresent && !invoicedDone) {
   const finishedTradesUnpaid = TRADES.some(pretty => {
     const key = String(pretty).toLowerCase();
@@ -614,47 +619,66 @@ if (invoicedPresent && !invoicedDone) {
     return !paidFamilyDone(records, info, tokens);
   });
 
-  if (hasFinalCompleteDone(records, info) && !finishedTradesUnpaid && hits.length === 0) {
-       return {
+
+  // ⬇️ NEW: if job is fully done, prefer Close — but keep trade To Pay if we have one
+  if (finalDone && !finishedTradesUnpaid) {
+    if (hits.length > 0) {
+      const top = hits[0];
+      return {
+        bucket: `${top.trade} To Pay + Jobs To Close`,
+        reason: `${top.trade} unpaid and job fully complete`,
+        trade: top.trade,
+        extra: null
+      };
+    }
+      return {
+    bucket: "Jobs To Invoice",
+    reason: '"Invoiced" present but job fully complete; keep in Invoice until invoiced done',
+  };
+}
+
+  // (keep your existing fall-through Invoice case)
+ if (invoicedPresent && !invoicedDone && !finalDone) {
+  return {
+    bucket: "Jobs To Invoice",
+    reason: '"Invoiced" present but not completed; job not fully done',
+  };
+}
+
+}
+}
+
+  // (rest of your existing override stays the same)
+const anyTrueUnpaidFinishedTrade = TRADES.some(pretty => {
+  const key = String(pretty).toLowerCase();
+  if (IGNORED_TRADES.has(key)) return false;
+  const tokens = tokensFor(pretty);
+  const tradeComplete = hasTradeCompleteSignal(pretty, records, info);
+  if (!tradeComplete) return false;
+  const anyPaidDone   = paidFamilyDone(records, info, tokens);
+  return !anyPaidDone; // finished work but no completed payment in the family
+  
+});
+
+vlog(`[INVOICE] anyTrueUnpaidFinishedTrade=${anyTrueUnpaidFinishedTrade}`);
+
+if (invoicePending && !finalDone && !anyTrueUnpaidFinishedTrade) {
+    if (hits.length > 0) {
+    // merge view so it appears in both columns
+    const top = hits[0];
+    return {
+      bucket: `${top.trade} To Pay + Jobs To Invoice`,
+      reason: `"Invoiced" present but not completed; unpaid signal for ${top.trade}`,
+      trade: top.trade,
+      extra: null
+    };
+  }
+  return {
     bucket: "Jobs To Invoice",
     reason: '"Invoiced" present but not completed; no finished trade awaiting payment',
     trade: null,
     extra: null
   };
-}
-}}
-
-  // Only run this override when invoice is actually pending
-if (invoicedPresent && !invoicedDone) {
-  const anyTrueUnpaidFinishedTrade = TRADES.some(pretty => {
-    const key = String(pretty).toLowerCase();
-    if (IGNORED_TRADES.has(key)) return false;
-    const tokens = tokensFor(pretty);
-    const tradeComplete = hasTradeCompleteSignal(pretty, records, info);
-    if (!tradeComplete) return false;
-    const anyPaidDone   = paidFamilyDone(records, info, tokens);
-    return !anyPaidDone; // finished work but no completed payment
-  });
-
-  vlog(`[INVOICE] anyTrueUnpaidFinishedTrade=${anyTrueUnpaidFinishedTrade}`);
-
-  if (!anyTrueUnpaidFinishedTrade) {
-    if (hits.length > 0) {
-      const top = hits[0];
-      return {
-        bucket: `${top.trade} To Pay + Jobs To Invoice`,
-        reason: `"Invoiced" present but not completed; unpaid signal for ${top.trade}`,
-        trade: top.trade,
-        extra: null
-      };
-    }
-    return {
-      bucket: "Jobs To Invoice",
-      reason: '"Invoiced" present but not completed; no finished trade awaiting payment',
-      trade: null,
-      extra: null
-    };
-  }
 }
 
   // ======= END INVOICE OVERRIDE =======
