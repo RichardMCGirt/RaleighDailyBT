@@ -488,25 +488,93 @@ for (const trade of TRADES){
   }
 }
 
+// --- HIDE RULE 2: 100% present but NOT done → suppress when nothing actionable ---
+{
+  const pendingFinal = hasFinalCompletePresentButNotDone(records, info);
 
-  // ======= INVOICE OVERRIDE =======
-  // If "Invoiced" exists and is NOT complete, and there is NO trade that is truly finished
-  // (trade work complete) AND unpaid, then route to Jobs To Invoice.
-  if (invoicedPresent && !invoicedDone){
-    const anyTrueUnpaidFinishedTrade = TRADES.some(trade => {
-      if (IGNORED_TRADES.has(trade)) return false;
+  if (pendingFinal) {
+    // Is there any actionable trade-to-pay signal? (explicit columns or titles)
+    const anyTradeToPay = TRADES.some(trade => {
+      if (IGNORED_TRADES.has(String(trade).toLowerCase())) return false;
+
+      const paidIdx  = info.paidByTrade[trade] ?? -1;
+      const toPayIdx = info.toPayByTrade[trade] ?? -1;
+
+      // explicit columns say it's still unpaid / to pay
+      const explicitUnpaid =
+        (paidIdx >= 0 && records.some(({ r }) => isFalse(r[paidIdx]))) ||
+        (toPayIdx >= 0 && records.some(({ r }) => isTruthy(r[toPayIdx]) || String(r[toPayIdx]).trim() !== ""));
+
+      // title-based signal (balanced rule)
       const tokens = tokensFor(trade);
-      // use the same completion semantics as Explain (Completed=TRUE OR %≥100)
-      const tradeComplete = hasTradeCompleteSignal(trade, records, info);
-      if (!tradeComplete) return false;
-      const anyPaidDone = paidTitlePresent(trade, records, info) && !paidTitleUnfinished(trade, records, info);
-      return !anyPaidDone;
+      const titleUnpaid = titleIndicatesTradeToPay(trade, records, info, tokens);
+
+      return explicitUnpaid || titleUnpaid;
     });
-    if (!anyTrueUnpaidFinishedTrade){
-      return { bucket:"Jobs To Invoice", reason:'"Invoiced" present but not completed; no finished trade awaiting payment', trade:null, extra:null };
+
+    // Any lien phrases?
+    const anyLien = records.some(({ r }) => anyContains(
+      [
+        info.phaseIdx >= 0 ? safeCell(r[info.phaseIdx]) : "",
+        info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "",
+        info.allNotesIdx >= 0 ? safeCell(r[info.allNotesIdx]) : ""
+      ].filter(Boolean).join(" | "),
+      PHRASES_LIEN
+    ));
+
+    // If it's a "fake 100%" (present but not actually done) AND there is no trade to pay and no lien,
+    // suppress entirely so it doesn't fall into Jobs To Invoice just for having invoice keywords.
+    if (!anyTradeToPay && !anyLien) {
+      return { bucket: null, reason: '"100% Job Complete" present but not done → suppress', trade: null, extra: null };
     }
-    // else: fall through — a finished trade still needs payment, so Trades To Pay stays top priority
   }
+}
+
+
+// ======= INVOICE OVERRIDE (revised with soft 100% guard for Siding) =======
+if (invoicedPresent && !invoicedDone) {
+  // existing hits-based check
+  const anyUnpaid = hits.some(h => h.trade && h.trade.toLowerCase() === "siding");
+
+  // NEW: fallback—treat "Paid Siding ..." unfinished as unpaid even if hits is empty,
+  // as long as the job looks 100% by percent (Completed may be blank in your sheet)
+  const unpaidSidingByTitle = paidTitleUnfinished("Siding", records, info);
+  const soft100 = records.some(({ r }) => {
+    const title = info.titleIdx>=0 ? String(r[info.titleIdx]).toLowerCase() : "";
+    const pct   = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
+    const looksFinal = title.includes("100% job complete") || title.includes("job complete/inspected");
+    return looksFinal && !Number.isNaN(pct) && pct >= 100;  // accept %≥100 even if Completed is blank
+  });
+
+  if (anyUnpaid || (unpaidSidingByTitle && soft100)) {
+    return {
+      bucket: "Siding To Pay + Jobs To Invoice",
+      reason: '"Invoiced" present but not completed and Siding unpaid',
+      trade: "siding",
+      extra: null
+    };
+  }
+
+  // (rest of your existing override stays the same)
+  const anyTrueUnpaidFinishedTrade = TRADES.some(trade => {
+    if (IGNORED_TRADES.has(trade)) return false;
+    const tradeComplete = hasTradeCompleteSignal(trade, records, info);
+    if (!tradeComplete) return false;
+    const anyPaidDone = paidTitlePresent(trade, records, info) && !paidTitleUnfinished(trade, records, info);
+    return !anyPaidDone;
+  });
+
+  if (!anyTrueUnpaidFinishedTrade) {
+    return {
+      bucket: "Jobs To Invoice",
+      reason: '"Invoiced" present but not completed; no finished trade awaiting payment',
+      trade: null,
+      extra: null
+    };
+  }
+}
+
+
   // ======= END INVOICE OVERRIDE =======
 
   // ======= STRICT TRADE GUARD with deterministic priority =======
@@ -572,13 +640,18 @@ for (const strictPretty of STRICT_ORDER){
     return { bucket:"Jobs To Invoice", reason:`contains “${phrase}” in ${combinedStatus(rec.r)}`, trade:null, extra:null };
   }
 
-  // PRIORITY 3: Close
-  if (info.completedIdx>=0 && records.some(({r}) => isTruthy(r[info.completedIdx]))){
-    return { bucket:"Jobs To Close", reason:"Completed = TRUE", trade:null, extra:null };
-  }
-  if (info.percentCompleteIdx>=0 && records.some(({r}) => Number(r[info.percentCompleteIdx])>=100)){
-    return { bucket:"Jobs To Close", reason:"PercentComplete ≥ 100", trade:null, extra:null };
-  }
+ // PRIORITY 3: Close (strict)
+// Only close when a FINAL row is truly done.
+if (hasFinalCompleteDone(records, info)){
+  return { bucket:"Jobs To Close", reason:"Final completion row done", trade:null, extra:null };
+}
+
+// (soft signals like generic %≥100 or 'close out' phrases are NOT enough)
+// If you still want to keep a softer fallback, guard it with explicit Completed=TRUE on any row:
+if (info.completedIdx>=0 && records.some(({r}) => isTruthy(r[info.completedIdx]))){
+  return { bucket:"Jobs To Close", reason:"Completed = TRUE", trade:null, extra:null };
+}
+
   if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_CLOSE))){
     const rec = records.find(({r}) => anyContains(combinedStatus(r), PHRASES_CLOSE));
     const phrase = PHRASES_CLOSE.find(p => contains(combinedStatus(rec.r), p));
@@ -727,32 +800,38 @@ $inspectBtn.addEventListener('click', ()=>{
 });
 
 // --- NEW helpers (place near your other helpers) ---
+// --- FINAL ROW DETECTORS (replace the old three helpers entirely) ---
 function isFinalCompleteRow(title){
   const t = String(title || "").toLowerCase();
-  // cover common variants; adjust as needed
-  return t.includes("100% job complete") || t.includes("100% complete");
+  // recognize both variants as "final"
+  return t.includes("100% job complete") ||
+         t.includes("100% complete") ||
+         t.includes("job complete/inspected") ||
+         t.includes("job complete / inspected");
 }
 
 function hasFinalCompleteDone(records, info){
-  // true only if there exists a "100% Job Complete" row AND it's actually complete
+  // true only if a final row exists AND it's actually complete
   return Array.isArray(records) && records.some(({ r }) => {
     const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
+    if (!isFinalCompleteRow(title)) return false;
     const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
-    const done  = Boolean(r[info.completedIdx]); // if you track a boolean "completed" column
-    return isFinalCompleteRow(title) && (done === true || (!Number.isNaN(pct) && pct >= 100));
+    const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+    return done === true || (!Number.isNaN(pct) && pct >= 100);
   });
 }
 
 function hasFinalCompletePresentButNotDone(records, info){
-  // exists a "100% Job Complete" row but it's not complete
+  // a final row exists but it's not actually complete
   return Array.isArray(records) && records.some(({ r }) => {
     const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
     if (!isFinalCompleteRow(title)) return false;
     const pct  = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
-    const done = Boolean(r[info.completedIdx]);
+    const done = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
     return !(done === true || (!Number.isNaN(pct) && pct >= 100));
   });
 }
+
 
 /* ----------------- header detection -------- */
 function chooseHeaderRowWithFallback(aoa, scanRows=10){
