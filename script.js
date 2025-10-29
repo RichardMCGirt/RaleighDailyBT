@@ -29,7 +29,7 @@ const $grid = document.getElementById('grid');
 const $inspectInput = document.getElementById('inspectInput');
 const $inspectBtn = document.getElementById('inspectBtn');
 const $inspectOut = document.getElementById('inspectOut');
-const IGNORED_TRADES = new Set(["housewrap"]); // never surface this trade in UI
+const IGNORED_TRADES = new Set(["housewrap", "porch"]); // never surface these trades in UI
 const STRICT_COMPLETION_TRADES = new Set(["porch", "screen porch"]);
 
 /* ----------------- state ------------------ */
@@ -217,8 +217,6 @@ function containsAny(txt, arr){
   return list.some(k => s.includes(String(k).toLowerCase()));
 }
 
-
-
 // (optional) defensive helper used in several places:
 function safeSome(arr, pred){
   return Array.isArray(arr) ? arr.some(pred) : false;
@@ -244,8 +242,6 @@ function buildTradeTitlePattern(trade){
   }
   return (leadEsc ? leadEsc + '\\s*' : '') + lastPattern;
 }
-
-
 
 // Does this job have any "<Trade> Complete/Completed" line that is actually complete? (Completed=TRUE or pct>=100)
 function hasTradeCompleteSignal(trade, records, info){
@@ -301,7 +297,6 @@ function titleIndicatesTradeToPay(trade, records, info, tokens){
   const paidRows       = rows.filter(x => x.s.includes("paid") && tokens.some(t => x.s.includes(t)));
   const anyPaidPending = paidRows.some(x => !rowIsCompleted(x.r, info));
   const anyPaidDone    = paidRows.some(x =>  rowIsCompleted(x.r, info));
-
 const tradeComplete  = hasTradeCompleteSignal(trade, records, info);
   const closeOutDone   = hasAnyCloseOutComplete(records, info);
 
@@ -325,8 +320,6 @@ const tradeComplete  = hasTradeCompleteSignal(trade, records, info);
   return false;
 }
 
-
-
 // === NEW HIDE RULE ===
 // If EVERY PercentComplete value present for this job is 0, suppress the job entirely.
 function jobShouldBeHiddenForZeroPercents(records, info){
@@ -343,7 +336,6 @@ function jobShouldBeHiddenForZeroPercents(records, info){
   }
   return sawNumeric; // true if we saw ONLY zeros (and no positives)
 }
-/* ------------------------------------ */
 
 /* ----------------- file handling ---------- */
 $file.addEventListener('change', async ()=>{
@@ -461,36 +453,41 @@ function decideForJob(job, records){
   });
 
   // --- Build potential Trade "To Pay" hits (explicit cols or titles)
-  const hits = [];
-  for (const trade of TRADES){
-    const paidIdx  = info.paidByTrade[trade] ?? -1;
-    const toPayIdx = info.toPayByTrade[trade] ?? -1;
+ // --- Build potential Trade "To Pay" hits (explicit cols or titles)
+const hits = [];
+for (const trade of TRADES){
+  // NEW: skip ignored trades entirely
+  if (IGNORED_TRADES.has(String(trade).toLowerCase())) continue;
 
-    // (a) explicit columns win immediately
-    if (paidIdx >= 0 && records.some(({r}) => isFalse(r[paidIdx]))){
-      hits.push({ trade, why: `Paid ${trade} = FALSE`, tiePct: 0 });
-      continue;
-    }
-    if (toPayIdx >= 0 && records.some(({r}) => isTruthy(r[toPayIdx]) || String(r[toPayIdx]).trim()!=="")){
-      hits.push({ trade, why: `${trade} To Pay marked`, tiePct: 0 });
-      continue;
-    }
+  const paidIdx  = info.paidByTrade[trade] ?? -1;
+  const toPayIdx = info.toPayByTrade[trade] ?? -1;
 
-    // (b) titles (balanced rule)
-    const tokens = tokensFor(trade);
-    if (titleIndicatesTradeToPay(trade, records, info, tokens)){
-      let minPct = 1000;
-      for (const { r } of records){
-        const title = info.titleIdx>=0 ? safeCell(r[info.titleIdx]) : "";
-        const pct   = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
-        const pats  = TRADE_DUE_TITLE_PATTERNS[trade] || [];
-        if (titleMatchesAny(pats, title)){
-          if (!isNaN(pct)) minPct = Math.min(minPct, pct); else minPct = Math.min(minPct, 999);
-        }
-      }
-      hits.push({ trade, why: `Title indicates ${trade} payment needed`, tiePct: isFinite(minPct) ? minPct : 999 });
-    }
+  // (a) explicit columns win immediately
+  if (paidIdx >= 0 && records.some(({r}) => isFalse(r[paidIdx]))){
+    hits.push({ trade, why: `Paid ${trade} = FALSE`, tiePct: 0 });
+    continue;
   }
+  if (toPayIdx >= 0 && records.some(({r}) => isTruthy(r[toPayIdx]) || String(r[toPayIdx]).trim()!=="")){
+    hits.push({ trade, why: `${trade} To Pay marked`, tiePct: 0 });
+    continue;
+  }
+
+  // (b) titles (balanced rule)
+  const tokens = tokensFor(trade);
+  if (titleIndicatesTradeToPay(trade, records, info, tokens)){
+    let minPct = 1000;
+    for (const { r } of records){
+      const title = info.titleIdx>=0 ? safeCell(r[info.titleIdx]) : "";
+      const pct   = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
+      const pats  = TRADE_DUE_TITLE_PATTERNS[trade] || [];
+      if (titleMatchesAny(pats, title)){
+        if (!isNaN(pct)) minPct = Math.min(minPct, pct); else minPct = Math.min(minPct, 999);
+      }
+    }
+    hits.push({ trade, why: `Title indicates ${trade} payment needed`, tiePct: isFinite(minPct) ? minPct : 999 });
+  }
+}
+
 
   // ======= INVOICE OVERRIDE =======
   // If "Invoiced" exists and is NOT complete, and there is NO trade that is truly finished
@@ -514,7 +511,7 @@ function decideForJob(job, records){
 
   // ======= STRICT TRADE GUARD with deterministic priority =======
   // Prefer Screen Porch over Porch, and if job is fully complete, also flag Jobs To Close.
-  const STRICT_ORDER = ["Screen Porch","Porch"]; // deterministic priority
+const STRICT_ORDER = ["Screen Porch","Porch"]; // deterministic priority
   // helper: is the whole job effectively complete?
   const fullyComplete = records.some(({r})=>{
     const title = safeCell(r[info.titleIdx]||"").toLowerCase();
@@ -524,23 +521,27 @@ function decideForJob(job, records){
     return isFinal && (done || (!isNaN(pct) && pct>=100));
   });
 
-  for (const strictPretty of STRICT_ORDER){
-    const strictTrade = strictPretty; // keep pretty label for messages
-    // Completion semantics consistent with Explain:
-    const tradeComplete   = hasTradeCompleteSignal(strictTrade, records, info);
-    const paidUnfinished  = paidTitleUnfinished(strictTrade, records, info);
-    const paidPresent     = paidTitlePresent(strictTrade, records, info);
-    const paidDone        = paidPresent && !paidUnfinished;
+for (const strictPretty of STRICT_ORDER){
+  const strictTrade = strictPretty; // keep pretty label for messages
+  // NEW: skip ignored trades (e.g., Porch)
+  if (IGNORED_TRADES.has(String(strictTrade).toLowerCase())) continue;
 
-    if (tradeComplete && !paidDone){
-      const base = `${strictTrade} To Pay`;
-      const bucket = fullyComplete ? `${base} + Jobs To Close` : base;
-      const reason = fullyComplete
-        ? `${strictTrade} complete, unpaid, and job fully complete`
-        : `${strictTrade} complete but Paid ${strictTrade} is false/unfinished`;
-      return { bucket, reason, trade: strictTrade.toLowerCase(), extra: null };
-    }
+  // Completion semantics consistent with Explain:
+  const tradeComplete   = hasTradeCompleteSignal(strictTrade, records, info);
+  const paidUnfinished  = paidTitleUnfinished(strictTrade, records, info);
+  const paidPresent     = paidTitlePresent(strictTrade, records, info);
+  const paidDone        = paidPresent && !paidUnfinished;
+
+  if (tradeComplete && !paidDone){
+    const base = `${strictTrade} To Pay`;
+    const bucket = fullyComplete ? `${base} + Jobs To Close` : base;
+    const reason = fullyComplete
+      ? `${strictTrade} complete, unpaid, and job fully complete`
+      : `${strictTrade} complete but Paid ${strictTrade} is false/unfinished`;
+    return { bucket, reason, trade: strictTrade.toLowerCase(), extra: null };
   }
+}
+
   // ======= END STRICT TRADE GUARD =======
 
   // If we still have Trade hits, pick the most urgent (lowest tiePct)
@@ -604,7 +605,11 @@ for (const [job, records] of jobGroups.entries()){
 const columns = [];
 
 // Per-trade "To Pay" columns — allow multi-bucket by using .includes(...)
+// Per-trade "To Pay" columns — allow multi-bucket by using .includes(...)
 for (const trade of TRADES){
+  // NEW: skip ignored trades (e.g., Porch)
+  if (IGNORED_TRADES.has(String(trade).toLowerCase())) continue;
+
   const items = [];
   for (const [job, decision] of assignment.entries()){
     const b = decision.bucket || "";
@@ -613,6 +618,7 @@ for (const trade of TRADES){
   if (items.length) items.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
   columns.push({ header:`${trade} To Pay`, items });
 }
+
 
 // Global buckets — also use .includes(...) to catch multi-bucket labels
 const invoice = [], close = [], lien = [];
