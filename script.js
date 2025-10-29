@@ -615,52 +615,47 @@ if (invoicedPresent && !invoicedDone) {
   });
 
   if (hasFinalCompleteDone(records, info) && !finishedTradesUnpaid && hits.length === 0) {
-    return {
-      bucket: "Jobs To Invoice",
-      reason: 'Job complete and all finished trades paid; "Invoiced" not completed',
-      trade: null,
-      extra: null
-    };
-  }
-}
-vlog(`[INVOICE] invoicedPresent=${invoicedPresent} invoicedDone=${invoicedDone} hasFinalCompleteDone=${hasFinalCompleteDone(records, info)} hits=${hits.length}`);
-
-  // (rest of your existing override stays the same)
-const anyTrueUnpaidFinishedTrade = TRADES.some(pretty => {
-  const key = String(pretty).toLowerCase();
-  if (IGNORED_TRADES.has(key)) return false;
-  const tokens = tokensFor(pretty);
-  const tradeComplete = hasTradeCompleteSignal(pretty, records, info);
-  if (!tradeComplete) return false;
-  const anyPaidDone   = paidFamilyDone(records, info, tokens);
-  return !anyPaidDone; // finished work but no completed payment in the family
-  
-});
-
-vlog(`[INVOICE] anyTrueUnpaidFinishedTrade=${anyTrueUnpaidFinishedTrade}`);
-
- if (!anyTrueUnpaidFinishedTrade) {
-  if (hits.length > 0) {
-    // merge view so it appears in both columns
-    const top = hits[0];
-    return {
-      bucket: `${top.trade} To Pay + Jobs To Invoice`,
-      reason: `"Invoiced" present but not completed; unpaid signal for ${top.trade}`,
-      trade: top.trade,
-      extra: null
-    };
-  }
-  return {
+       return {
     bucket: "Jobs To Invoice",
     reason: '"Invoiced" present but not completed; no finished trade awaiting payment',
     trade: null,
     extra: null
   };
 }
+}}
 
+  // Only run this override when invoice is actually pending
+if (invoicedPresent && !invoicedDone) {
+  const anyTrueUnpaidFinishedTrade = TRADES.some(pretty => {
+    const key = String(pretty).toLowerCase();
+    if (IGNORED_TRADES.has(key)) return false;
+    const tokens = tokensFor(pretty);
+    const tradeComplete = hasTradeCompleteSignal(pretty, records, info);
+    if (!tradeComplete) return false;
+    const anyPaidDone   = paidFamilyDone(records, info, tokens);
+    return !anyPaidDone; // finished work but no completed payment
+  });
+
+  vlog(`[INVOICE] anyTrueUnpaidFinishedTrade=${anyTrueUnpaidFinishedTrade}`);
+
+  if (!anyTrueUnpaidFinishedTrade) {
+    if (hits.length > 0) {
+      const top = hits[0];
+      return {
+        bucket: `${top.trade} To Pay + Jobs To Invoice`,
+        reason: `"Invoiced" present but not completed; unpaid signal for ${top.trade}`,
+        trade: top.trade,
+        extra: null
+      };
+    }
+    return {
+      bucket: "Jobs To Invoice",
+      reason: '"Invoiced" present but not completed; no finished trade awaiting payment',
+      trade: null,
+      extra: null
+    };
+  }
 }
-
-vlog(`[INVOICE → RETURN] "Invoiced" present but not completed; no finished trade awaiting payment`);
 
   // ======= END INVOICE OVERRIDE =======
 
@@ -698,23 +693,42 @@ const paidUnfinished = paidFamilyUnfinished(records, info, tokens);
   }
 }
 
-  // ======= END STRICT TRADE GUARD =======
+// If we still have Trade hits, pick the most urgent (lowest tiePct)
+if (hits.length){
+  hits.sort((a,b) => a.tiePct - b.tiePct);
+  const pick = hits[0];
+  return { bucket: `${pick.trade} To Pay`, reason: pick.why, trade: pick.trade, extra: null };
+}
 
-  // If we still have Trade hits, pick the most urgent (lowest tiePct)
-  if (hits.length){
-    hits.sort((a,b) => a.tiePct - b.tiePct);
-    const pick = hits[0];
-    return { bucket: `${pick.trade} To Pay`, reason: pick.why, trade: pick.trade, extra: null };
-  }
+// --- FINAL COMPLETION BEFORE INVOICE ---
+const allTradesFinished = TRADES.every(pretty => {
+  const key = String(pretty).toLowerCase();
+  if (IGNORED_TRADES.has(key)) return true;
+  const tokens = tokensFor(pretty);
+  const tradeComplete = hasTradeCompleteSignal(pretty, records, info);
+  if (!tradeComplete) return false;
+  return paidFamilyDone(records, info, tokens);
+});
 
-  // Block Invoice when a real "100% Job Complete" line is actually complete
-  const hasBlocking100Complete = records.some(({r}) => {
-    const phrasePresent = contains(combinedStatus(r), "100% job complete");
-    if (!phrasePresent) return false;
-    const pct = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
-    const completedTruth = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
-    return completedTruth || (!isNaN(pct) && pct >= 100);
-  });
+if (hasFinalCompleteDone(records, info) && allTradesFinished) {
+  vlog('[CLOSE] all trades finished and final done → Jobs To Close');
+  return {
+    bucket: "Jobs To Close",
+    reason: "All trades completed and paid; final complete",
+    trade: null,
+    extra: null
+  };
+}
+
+// Block Invoice when a real "100% Job Complete" line is actually complete
+const hasBlocking100Complete = records.some(({r}) => {
+  const phrasePresent = contains(combinedStatus(r), "100% job complete");
+  if (!phrasePresent) return false;
+  const pct = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
+  const completedTruth = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
+  return completedTruth || (!isNaN(pct) && pct >= 100);
+});
+
 
   // SECONDARY: If 100% is complete but "Invoiced" is present & NOT complete → Jobs To Invoice
   if (hasBlocking100Complete && invoicedPresent && !invoicedDone){
