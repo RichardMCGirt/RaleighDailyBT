@@ -1,3 +1,4 @@
+
 /* ----------------- logger ----------------- */
 const $log = document.getElementById('log');
 const $verbose = document.getElementById('verbose');
@@ -195,6 +196,16 @@ const TRADE_ACTIVITY_KEYWORDS = {
   "Louvered Wall": ["louver","louvered wall"],
   "Gutters":       ["gutter","downspout","down spout"],
 };
+// Map trades to “complete” title patterns (add or adjust as you use in your sheet)
+const TRADE_COMPLETE_TITLE_PATTERNS = {
+  "Siding": [/^siding complete\b/i, /^job complete\/inspected\b/i],
+  "Screen Porch": [/^screen porch complete\b/i, /^porch complete\b/i],
+  "Porch": [/^porch complete\b/i],
+  "Rails": [/^rails complete\b/i],
+  "House Wrap": [/^house wrap complete\b/i],
+  // fallbacks: many jobs use “Job Complete/Inspected” as global finish signal
+  "_global": [/^job complete\/inspected\b/i, /^100% job complete\b/i],
+};
 
 // “to pay/payment due” patterns (we do not include “Paid …” here)
 const TRADE_DUE_TITLE_PATTERNS = {
@@ -207,6 +218,7 @@ const TRADE_DUE_TITLE_PATTERNS = {
   "Louvered Wall": [/(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b).*(louver(ed)?\s*wall|louver)/i, /(louver(ed)?\s*wall|louver).*(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b)/i],
   "Gutters":       [/(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b).*(gutter)/i, /(gutter).*(\bpay\b|\bto\s*pay\b|\bpayment\s*due\b)/i],
 };
+let TRADE_FINISH_STRICT = false; // set to true for “must have Siding Complete” etc.
 
 const PHRASES_INVOICE = ["invoice","ready to invoice","ready to bill","pay crew","ready to pay","bill now","billing","send invoice","invoice ready","ready for invoice"];
 const PHRASES_CLOSE = ["job complete/inspected","job complete","100% job complete","close out","closed"];
@@ -215,6 +227,39 @@ const PHRASES_LIEN  = ["lien","liens needed","lien needed"];
 /* --------- HOISTED HELPERS --------- */
 // --- SAFETY GUARDS ---
 function safeArray(a){ return Array.isArray(a) ? a : []; }
+function tradeIsFinished(trade, records, info){
+  const base = TRADE_COMPLETE_TITLE_PATTERNS[trade] || [];
+  const pats = TRADE_FINISH_STRICT
+    ? base                                 // strict: per-trade only
+    : base.concat(TRADE_COMPLETE_TITLE_PATTERNS._global || []); // allow global finisher
+
+  let soft = false;
+  for (const { r } of records){
+    const title = info.titleIdx>=0 ? safeCell(r[info.titleIdx]) : "";
+    const done  = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
+    const pct   = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
+    if (pats.some(rx => rx.test(title))){
+      if (done === true) return true;       // strict finisher
+      if (!isNaN(pct) && pct >= 100) soft = true; // soft finisher
+    }
+  }
+  return soft;
+}
+
+// If a trade has contradictory rows (some TRUE, some FALSE) we prefer TRUE
+function tradePaidTruthiness(trade, records, info){
+  const paidIdx = info.paidByTrade[trade] ?? -1;
+  if (paidIdx < 0) return null;
+  let sawTrue = false, sawFalse = false;
+  for (const { r } of records){
+    const v = r[paidIdx];
+    if (isTruthy(v)) sawTrue = true;
+    else if (isFalse(v)) sawFalse = true;
+  }
+  if (sawTrue)  return true;   // prefer TRUE if mixed
+  if (sawFalse) return false;
+  return null;
+}
 
 function anyContains(text, phrases){
   const t = String(text || "").toLowerCase();
@@ -457,340 +502,169 @@ function paidFamilyUnfinished(records, info, tokens){
   return paidFamilyAny(records, info, tokens, /*decideDone=*/false);
 }
 
-    // Decision engine
 function decideForJob(job, records){
   if (!Array.isArray(records) || records.length === 0){
     return { bucket:null, reason:"no records for job", trade:null, extra:null };
   }
-vlog(`[PENDING_FINAL] present=${hasFinalCompletePresentButNotDone(records, info)} | anyTradeToPay? (computed below)`);
 
-  // HIDE RULE: if every PercentComplete value present for this job equals 0 → suppress
-  if (jobShouldBeHiddenForZeroPercents(records, info)){
-    return { bucket:null, reason:"All PercentComplete entries are 0 → suppress", trade:null, extra:null };
-  }
-// --- HARD HIDE: final row present but NOT actually done → hide job
-{
-  const pendingFinal = hasFinalCompletePresentButNotDone(records, info); // final line exists but not done
-  if (pendingFinal) {
-    // still allow liens to surface
-    const anyLien = records.some(({ r }) => anyContains(
-      [
-        info.phaseIdx >= 0 ? safeCell(r[info.phaseIdx]) : "",
-        info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "",
-        info.allNotesIdx >= 0 ? safeCell(r[info.allNotesIdx]) : ""
-      ].filter(Boolean).join(" | "),
-      PHRASES_LIEN
-    ));
-
-    if (anyLien) {
-      return { bucket: "Liens Needed", reason: "lien phrase found (final pending)", trade: null, extra: null };
-    }
-
-    // Nothing else should show if the job isn't done
-    vlog('[SUPPRESS] Final present but not done → hide job (no trades/invoice shown)');
-    return { bucket: null, reason: 'Final present but not done → suppress (job not done)', trade: null, extra: null };
-  }
-}
-
-  // Utility to compose status text for scans
-  const combinedStatus = (r)=>{
+  // ---- helpers hoisted so they’re safe anywhere below
+  function combinedStatus(r){
     const parts = [];
     if (info.phaseIdx>=0) parts.push(safeCell(r[info.phaseIdx]));
     if (info.titleIdx>=0) parts.push(safeCell(r[info.titleIdx]));
     if (info.allNotesIdx>=0) parts.push(safeCell(r[info.allNotesIdx]));
     return parts.filter(Boolean).join(" | ");
+  }
+
+  // Completion title patterns per trade (extend as needed)
+  const TRADE_COMPLETE_TITLE_PATTERNS = {
+    "Siding":        [/^siding complete\b/i],
+    "Screen Porch":  [/^screen porch complete\b/i, /^porch complete\b/i],
+    "Porch":         [/^porch complete\b/i],
+    "Rails":         [/^rails complete\b/i],
+    "House Wrap":    [/^house wrap complete\b/i],
+    // Global finishers some jobs use:
+    "_global":       [/^job complete\/inspected\b/i, /^100%\s*job\s*complete\b/i],
   };
 
-  // --- Detect "Invoiced" presence/completion up front
-  const invoicedRows    = records.filter(({r}) => contains(combinedStatus(r), "invoiced"));
+  // Allow “global finishers” (JCI/100%) to count as finished for THESE trades only.
+  // You asked for Siding To Pay when JCI=100 and Paid Siding is FALSE.
+  const GLOBAL_FINISH_OK_FOR = new Set(["Siding"]);
+
+  function titleMatchesAny(pats, title){
+    const t = String(title || "");
+    return (pats||[]).some(rx => rx.test(t));
+  }
+
+  function tradeIsFinished(trade, recs, meta){
+    const base = TRADE_COMPLETE_TITLE_PATTERNS[trade] || [];
+    const pats = GLOBAL_FINISH_OK_FOR.has(trade)
+      ? base.concat(TRADE_COMPLETE_TITLE_PATTERNS._global || [])
+      : base;
+    let soft = false;
+    for (const { r } of recs){
+      const title = meta.titleIdx>=0 ? safeCell(r[meta.titleIdx]) : "";
+      const done  = meta.completedIdx>=0 ? isTruthy(r[meta.completedIdx]) : false;
+      const pct   = meta.percentCompleteIdx>=0 ? Number(r[meta.percentCompleteIdx]) : NaN;
+      if (titleMatchesAny(pats, title)){
+        if (done === true) return true;              // strict finisher
+        if (!isNaN(pct) && pct >= 100) soft = true;  // soft finisher
+      }
+    }
+    return soft;
+  }
+
+  // Prefer TRUE if a “Paid <Trade>” column has mixed values, so old FALSE rows don’t trigger
+  function tradePaidTruthiness(trade, recs, meta){
+    const paidIdx = meta.paidByTrade[trade] ?? -1;
+    if (paidIdx < 0) return null; // no explicit column
+    let sawTrue = false, sawFalse = false;
+    for (const { r } of recs){
+      const v = r[paidIdx];
+      if (isTruthy(v)) sawTrue = true;
+      else if (isFalse(v)) sawFalse = true;
+    }
+    if (sawTrue)  return true;
+    if (sawFalse) return false;
+    return null;
+  }
+
+  // “Ready” (kept strict for INVOICE only): JCI row with Completed = TRUE
+  const readyForInvoiceGate = records.some(({r})=>{
+    const title = info.titleIdx>=0 ? safeCell(r[info.titleIdx]).toLowerCase() : "";
+    const done  = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
+    return title.includes("job complete/inspected") && done === true;
+  });
+
+  // Final / invoice flags
+  const finalDone = hasFinalCompleteDone(records, info); // e.g., "100% Job Complete" Completed=TRUE
+  const pendingFinal = hasFinalCompletePresentButNotDone(records, info);
+
+  const invoicedRows    = records.filter(({r}) => combinedStatus(r).toLowerCase().includes("invoiced"));
   const invoicedPresent = invoicedRows.length > 0;
   const invoicedDone    = invoicedRows.some(({r}) => {
     const pct = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
     const completedTruth = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
     return completedTruth || (!isNaN(pct) && pct >= 100);
   });
-const finalDone = hasFinalCompleteDone(records, info);
-const invoicePending = invoicedPresent && !invoicedDone;
+  const invoicePending = invoicedPresent && !invoicedDone;
 
- // --- Build potential Trade "To Pay" hits (explicit cols or titles)
-const hits = [];
-for (const trade of TRADES){
-  // NEW: skip ignored trades entirely
-  if (IGNORED_TRADES.has(String(trade).toLowerCase())) continue;
-
-  const paidIdx  = info.paidByTrade[trade] ?? -1;
-  const toPayIdx = info.toPayByTrade[trade] ?? -1;
-
-  // (a) explicit columns win immediately
-  if (paidIdx >= 0 && records.some(({r}) => isFalse(r[paidIdx]))){
-    hits.push({ trade, why: `Paid ${trade} = FALSE`, tiePct: 0 });
-    continue;
-  }
-  if (toPayIdx >= 0 && records.some(({r}) => isTruthy(r[toPayIdx]) || String(r[toPayIdx]).trim()!=="")){
-    hits.push({ trade, why: `${trade} To Pay marked`, tiePct: 0 });
-    continue;
-  }
-
-
-  // (b) titles (balanced rule)
-  const tokens = tokensFor(trade);
-  if (titleIndicatesTradeToPay(trade, records, info, tokens)){
-    let minPct = 1000;
-    for (const { r } of records){
-      const title = info.titleIdx>=0 ? safeCell(r[info.titleIdx]) : "";
-      const pct   = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
-      const pats  = TRADE_DUE_TITLE_PATTERNS[trade] || [];
-      if (titleMatchesAny(pats, title)){
-        if (!isNaN(pct)) minPct = Math.min(minPct, pct); else minPct = Math.min(minPct, 999);
+  // --- hide obvious non-actionables (conservative "all zero" guard)
+  {
+    const allZero = jobShouldBeHiddenForZeroPercents(records, info);
+    if (allZero){
+      const hasInvoicePhrase = records.some(({r}) => anyContains(combinedStatus(r), PHRASES_INVOICE));
+      const hasTradeActivity = TRADES.some(pretty => {
+        if (IGNORED_TRADES.has(String(pretty).toLowerCase())) return false;
+        const tokens = tokensFor(pretty);
+        return titleIndicatesTradeToPay(pretty, records, info, tokens) ||
+               paidFamilyUnfinished(records, info, tokens) ||
+               paidFamilyDone(records, info, tokens);
+      });
+      if (!hasInvoicePhrase && !hasTradeActivity){
+        return { bucket:null, reason:"All PercentComplete entries are 0 and no invoice/trade activity → suppress", trade:null, extra:null };
       }
     }
-    hits.push({ trade, why: `Title indicates ${trade} payment needed`, tiePct: isFinite(minPct) ? minPct : 999 });
   }
-}
 
-// --- HIDE RULE 2: 100% present but NOT done → suppress when nothing actionable ---
-vlog(`[PENDING_FINAL] present=${hasFinalCompletePresentButNotDone(records, info)} | anyTradeToPay? (computed below)`);
+  // ======================
+  // PRIORITY 1: TRADES — completed & unpaid must surface FIRST (no “ready” gate)
+  for (const trade of TRADES){
+    if (IGNORED_TRADES.has(String(trade).toLowerCase())) continue;
 
-{
-  const pendingFinal = hasFinalCompletePresentButNotDone(records, info);
+    if (!tradeIsFinished(trade, records, info)) continue;
 
-  if (pendingFinal) {
-    // Is there any actionable trade-to-pay signal? (explicit columns or titles)
-    const anyTradeToPay = TRADES.some(trade => {
-      if (IGNORED_TRADES.has(String(trade).toLowerCase())) return false;
-
-      const paidIdx  = info.paidByTrade[trade] ?? -1;
-      const toPayIdx = info.toPayByTrade[trade] ?? -1;
-
-      // explicit columns say it's still unpaid / to pay
-      const explicitUnpaid =
-        (paidIdx >= 0 && records.some(({ r }) => isFalse(r[paidIdx]))) ||
-        (toPayIdx >= 0 && records.some(({ r }) => isTruthy(r[toPayIdx]) || String(r[toPayIdx]).trim() !== ""));
-
-      // title-based signal (balanced rule)
-      const tokens = tokensFor(trade);
-      const titleUnpaid = titleIndicatesTradeToPay(trade, records, info, tokens);
-
-      return explicitUnpaid || titleUnpaid;
-    });
-
-    // Any lien phrases?
-    const anyLien = records.some(({ r }) => anyContains(
-      [
-        info.phaseIdx >= 0 ? safeCell(r[info.phaseIdx]) : "",
-        info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "",
-        info.allNotesIdx >= 0 ? safeCell(r[info.allNotesIdx]) : ""
-      ].filter(Boolean).join(" | "),
-      PHRASES_LIEN
-    ));
-
-   // If it's a "fake 100%" (present but not actually done) AND there is no trade to pay and no lien,
-// suppress — UNLESS invoice is pending AND job is actually complete AND no finished trade is unpaid.
-if (!anyTradeToPay && !anyLien) {
-
-  // family-aware: count waterproof deck as Decking payment, etc.
-  const finishedTradesUnpaid = TRADES.some(pretty => {
-    const key = String(pretty).toLowerCase();
-    if (IGNORED_TRADES.has(key)) return false;
-    const tokens = tokensFor(pretty);
-    const tradeComplete = hasTradeCompleteSignal(pretty, records, info);
-    if (!tradeComplete) return false;
-    return !paidFamilyDone(records, info, tokens);
-  });
-
-  // job truly complete (100% or Completed=TRUE on a final line)
-
-  if (invoicePending && finalDone && !finishedTradesUnpaid) {
-    // Do NOT suppress; let invoice logic pick it up later.
-  } else {
-    return { bucket: null, reason: '"100% Job Complete" present but not done → suppress', trade: null, extra: null };
-  }
-}}
-
-// Completed & all finished trades paid, but invoice is pending → Jobs To Invoice
-// Replace the existing block
-if (invoicedPresent && !invoicedDone) {
-  const finishedTradesUnpaid = TRADES.some(pretty => {
-    const key = String(pretty).toLowerCase();
-    if (IGNORED_TRADES.has(key)) return false;
-    const tokens = tokensFor(pretty);
-    const tradeComplete = hasTradeCompleteSignal(pretty, records, info);
-    if (!tradeComplete) return false;
-    return !paidFamilyDone(records, info, tokens);
-  });
-
-
-  // ⬇️ NEW: if job is fully done, prefer Close — but keep trade To Pay if we have one
-  if (finalDone && !finishedTradesUnpaid) {
-    if (hits.length > 0) {
-      const top = hits[0];
-      return {
-        bucket: `${top.trade} To Pay + Jobs To Close`,
-        reason: `${top.trade} unpaid and job fully complete`,
-        trade: top.trade,
-        extra: null
-      };
+    const paidTruth = tradePaidTruthiness(trade, records, info);
+    if (paidTruth === true) continue; // already paid
+    if (paidTruth === false){
+      if (String(trade).toLowerCase()==="porch" && typeof HIDE_PORCH_TO_PAY!=="undefined" && HIDE_PORCH_TO_PAY){
+        return { bucket:null, reason:"Porch To Pay hidden by user", trade:trade, extra:"Paid Porch = FALSE (finished)" };
+      }
+      return { bucket:`${trade} To Pay`, reason:`Paid ${trade} = FALSE (finished)`, trade:trade, extra:null };
     }
-      return {
-    bucket: "Jobs To Invoice",
-    reason: '"Invoiced" present but job fully complete; keep in Invoice until invoiced done',
-  };
-}
 
-  // (keep your existing fall-through Invoice case)
- if (invoicedPresent && !invoicedDone && !finalDone) {
-  return {
-    bucket: "Jobs To Invoice",
-    reason: '"Invoiced" present but not completed; job not fully done',
-  };
-}
-
-}
-}
-
-  // (rest of your existing override stays the same)
-const anyTrueUnpaidFinishedTrade = TRADES.some(pretty => {
-  const key = String(pretty).toLowerCase();
-  if (IGNORED_TRADES.has(key)) return false;
-  const tokens = tokensFor(pretty);
-  const tradeComplete = hasTradeCompleteSignal(pretty, records, info);
-  if (!tradeComplete) return false;
-  const anyPaidDone   = paidFamilyDone(records, info, tokens);
-  return !anyPaidDone; // finished work but no completed payment in the family
-  
-});
-
-vlog(`[INVOICE] anyTrueUnpaidFinishedTrade=${anyTrueUnpaidFinishedTrade}`);
-
-if (invoicePending && !finalDone && !anyTrueUnpaidFinishedTrade) {
-    if (hits.length > 0) {
-    // merge view so it appears in both columns
-    const top = hits[0];
-    return {
-      bucket: `${top.trade} To Pay + Jobs To Invoice`,
-      reason: `"Invoiced" present but not completed; unpaid signal for ${top.trade}`,
-      trade: top.trade,
-      extra: null
-    };
+    // If no explicit Paid column, allow title-based due only when finished
+    const tokens = tokensFor(trade);
+    if (titleIndicatesTradeToPay(trade, records, info, tokens)){
+      if (String(trade).toLowerCase()==="porch" && typeof HIDE_PORCH_TO_PAY!=="undefined" && HIDE_PORCH_TO_PAY){
+        return { bucket:null, reason:"Porch To Pay hidden by user", trade:trade, extra:"title indicates payment needed (finished)" };
+      }
+      return { bucket:`${trade} To Pay`, reason:`${trade} payment needed (title/implicit, finished)`, trade:trade, extra:null };
+    }
   }
-  return {
-    bucket: "Jobs To Invoice",
-    reason: '"Invoiced" present but not completed; no finished trade awaiting payment',
-    trade: null,
-    extra: null
-  };
-}
+  // ======================
 
-  // ======= END INVOICE OVERRIDE =======
-
-  // ======= STRICT TRADE GUARD with deterministic priority =======
-  // Prefer Screen Porch over Porch, and if job is fully complete, also flag Jobs To Close.
-const STRICT_ORDER = ["Screen Porch","Porch"]; // deterministic priority
-  // helper: is the whole job effectively complete?
-  const fullyComplete = records.some(({r})=>{
-    const title = safeCell(r[info.titleIdx]||"").toLowerCase();
-    const pct   = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
-    const done  = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
-    const isFinal = title.includes("100% job complete") || title.includes("job complete/inspected");
-    return isFinal && (done || (!isNaN(pct) && pct>=100));
-  });
-
-for (const strictPretty of STRICT_ORDER){
-  const strictTrade = strictPretty; // keep pretty label for messages
-  // NEW: skip ignored trades (e.g., Porch)
-  if (IGNORED_TRADES.has(String(strictTrade).toLowerCase())) continue;
-
-  // Completion semantics consistent with Explain:
-  const tradeComplete   = hasTradeCompleteSignal(strictTrade, records, info);
-const tokens       = tokensFor(strictTrade);
-const paidDone     = paidFamilyDone(records, info, tokens);
-const paidUnfinished = paidFamilyUnfinished(records, info, tokens);
-
-
-  if (tradeComplete && !paidDone){
-    const base = `${strictTrade} To Pay`;
-    const bucket = fullyComplete ? `${base} + Jobs To Close` : base;
-    const reason = fullyComplete
-      ? `${strictTrade} complete, unpaid, and job fully complete`
-      : `${strictTrade} complete but Paid ${strictTrade} is false/unfinished`;
-    return { bucket, reason, trade: strictTrade.toLowerCase(), extra: null };
-  }
-}
-
-// If we still have Trade hits, pick the most urgent (lowest tiePct)
-if (hits.length){
-  hits.sort((a,b) => a.tiePct - b.tiePct);
-  const pick = hits[0];
-  return { bucket: `${pick.trade} To Pay`, reason: pick.why, trade: pick.trade, extra: null };
-}
-
-// --- FINAL COMPLETION BEFORE INVOICE ---
-const allTradesFinished = TRADES.every(pretty => {
-  const key = String(pretty).toLowerCase();
-  if (IGNORED_TRADES.has(key)) return true;
-  const tokens = tokensFor(pretty);
-  const tradeComplete = hasTradeCompleteSignal(pretty, records, info);
-  if (!tradeComplete) return false;
-  return paidFamilyDone(records, info, tokens);
-});
-
-if (hasFinalCompleteDone(records, info) && allTradesFinished) {
-  vlog('[CLOSE] all trades finished and final done → Jobs To Close');
-  return {
-    bucket: "Jobs To Close",
-    reason: "All trades completed and paid; final complete",
-    trade: null,
-    extra: null
-  };
-}
-
-// Block Invoice when a real "100% Job Complete" line is actually complete
-const hasBlocking100Complete = records.some(({r}) => {
-  const phrasePresent = contains(combinedStatus(r), "100% job complete");
-  if (!phrasePresent) return false;
-  const pct = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
-  const completedTruth = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
-  return completedTruth || (!isNaN(pct) && pct >= 100);
-});
-
-
-  // SECONDARY: If 100% is complete but "Invoiced" is present & NOT complete → Jobs To Invoice
-  if (hasBlocking100Complete && invoicedPresent && !invoicedDone){
-    return { bucket:"Jobs To Invoice", reason:"100% complete but Invoiced not completed", trade:null, extra:null };
+  // --- AFTER trades: now apply pendingFinal hide (so it never masks unpaid trades)
+  if (pendingFinal){
+    const anyLien = records.some(({r}) => anyContains(combinedStatus(r), PHRASES_LIEN));
+    if (anyLien){
+      return { bucket:"Liens Needed", reason:"lien phrase found (final pending)", trade:null, extra:null };
+    }
+    return { bucket:null, reason:"Final present but not done → suppress (job not done)", trade:null, extra:null };
   }
 
-  // PRIORITY 2: Invoice (keywords)
-  if (!hasBlocking100Complete && records.some(({r}) => anyContains(combinedStatus(r), PHRASES_INVOICE))){
-    const rec = records.find(({r}) => anyContains(combinedStatus(r), PHRASES_INVOICE));
-    const phrase = PHRASES_INVOICE.find(p => contains(combinedStatus(rec.r), p));
-    return { bucket:"Jobs To Invoice", reason:`contains “${phrase}” in ${combinedStatus(rec.r)}`, trade:null, extra:null };
+  // PRIORITY 2: INVOICE — only if no unpaid trades and “ready”
+  if (invoicedPresent){
+    if (!invoicedDone && readyForInvoiceGate){
+      return { bucket:"Jobs To Invoice", reason:'"Invoiced" present but not completed; no finished trade awaiting payment', trade:null, extra:null };
+    }
   }
 
- // PRIORITY 3: Close (strict)
-// Only close when a FINAL row is truly done.
-if (hasFinalCompleteDone(records, info)){
-  return { bucket:"Jobs To Close", reason:"Final completion row done", trade:null, extra:null };
-}
-
-// (soft signals like generic %≥100 or 'close out' phrases are NOT enough)
-// If you still want to keep a softer fallback, guard it with explicit Completed=TRUE on any row:
-if (info.completedIdx>=0 && records.some(({r}) => isTruthy(r[info.completedIdx]))){
-  return { bucket:"Jobs To Close", reason:"Completed = TRUE", trade:null, extra:null };
-}
-
-  if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_CLOSE))){
-    const rec = records.find(({r}) => anyContains(combinedStatus(r), PHRASES_CLOSE));
-    const phrase = PHRASES_CLOSE.find(p => contains(combinedStatus(rec.r), p));
-    return { bucket:"Jobs To Close", reason:`contains “${phrase}”`, trade:null, extra:null };
+  // PRIORITY 3: CLOSE — only when final done AND invoice completed (and no unpaid trades, already ensured)
+  if (finalDone && invoicedDone){
+    return { bucket:"Jobs To Close", reason:"Final completion row done and invoice completed; all trades paid", trade:null, extra:null };
   }
 
-  // PRIORITY 4: Liens
+  // Liens (always surface if present)
   if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_LIEN))){
     return { bucket:"Liens Needed", reason:"lien phrase found", trade:null, extra:null };
   }
 
+  // Nothing actionable
   return { bucket:null, reason:"no rules matched", trade:null, extra:null };
 }
+
+
 
 
   // assign jobs
@@ -991,22 +865,33 @@ function titleMatchesAny(rxList, title){
   const list = safeArray(rxList);
   return list.some(rx => rx && typeof rx.test === "function" && rx.test(t));
 }
-
 function scoreRowAsHeader(row){
   const vals = (row||[]).map(safeCell);
   const nonEmpty = vals.filter(t => t.trim()!=="");
   if (!nonEmpty.length) return -1;
+
   const normalized = nonEmpty.map(norm);
   const uniq = new Set(normalized).size;
   const uniqScore = uniq / Math.max(1, nonEmpty.length);
-  const hints = ["job","title","phase","notes","percentcomplete","completed","paid","to","pay","topay","siding","painters","columns","trellis","screen porch","decking","waterproof","louvered","wall","gutters","invoice","lien","close"].map(norm);
-  let hintHits = 0; for (const n of normalized){ if (n.length <= 30 && hints.some(h => n.includes(h))) hintHits++; }
+
+  // Header "hints" typical of your sheet
+  const headerHints = [
+    "job","title","phase","completed","percent","percentcomplete",
+    "allnotes","notes","paid","to", "topay","invoice","invoiced"
+  ];
+  let hintHits = 0;
+  for (const n of normalized){
+    if (n.length <= 30 && headerHints.some(h => n.includes(h))) hintHits++;
+  }
   const hintScore = hintHits / Math.max(1, nonEmpty.length);
+
   const m = bannerMetrics(row);
   const bannerPenalty = looksLikeBannerMetrics(m) ? (m.repeatRatio - 0.6) * 2.0 : 0;
-  const lengthPenalty = m.avgLen > 35 ? (m.avgLen-35)/50 : 0;
-  return (0.55*hintScore + 0.45*uniqScore) - (bannerPenalty + lengthPenalty);
+  const lengthPenalty = m.avgLen > 35 ? (m.avgLen - 35) / 50 : 0;
+
+  return (0.55 * hintScore + 0.45 * uniqScore) - (bannerPenalty + lengthPenalty);
 }
+
 
 function bannerMetrics(row){
   const vals = (row||[]).map(safeCell).filter(t=>t.trim()!=="");
