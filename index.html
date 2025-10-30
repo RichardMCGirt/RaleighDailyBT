@@ -4,16 +4,16 @@
   <meta charset="utf-8" />
   <title>Who To Pay — Single-Bucket per Job (Trades > Invoice > Close > Lien)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<link rel="stylesheet" href="style.css">
-
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <h1>BT Tool</h1>
-  <p class="sub">Each job appears in a single bucket based on priority: <b>Trades To Pay</b> → <b>Jobs To Invoice</b> → <b>Jobs To Close</b> → <b>Liens Needed</b>. Upload your workbook and click Compute.</p>
+  <p class="sub">Each job appears in a single bucket based on priority: <b>Trades To Pay</b> → <b>Jobs To Invoice</b> → <b>Jobs To Close</b> → <b>Liens Needed</b>. Upload your workbooks (you can select multiple) and click Compute.</p>
 
   <div class="card">
     <div class="row">
-      <input id="fileInput" type="file" accept=".xlsx,.xls" />
+      <!-- allow multiple files -->
+      <input id="fileInput" type="file" accept=".xlsx,.xls" multiple />
       <button id="runBtn" class="primary">Compute</button>
       <button id="downloadBtn" disabled>Download Excel (MM-dd-yyyy)</button>
       <span id="countBadge" class="pill">0 rows</span>
@@ -44,13 +44,9 @@
     <div id="inspectOut" class="explain" style="margin-top:10px;"></div>
   </div>
 
-  <div class="card">
-    <strong>Logs</strong>
     <div id="log" class="log"></div>
-  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
- <script src="script.js"></script>
-
+  <script src="script.js"></script>
 </body>
 </html>
