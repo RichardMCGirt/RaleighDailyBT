@@ -95,3 +95,9 @@ button.loading::after {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+.item-done {
+  background-color: #e0e0e0;   /* grey background */
+  color: #555;                 /* softer text color */
+  text-decoration: line-through;
+  opacity: 0.7;                /* slightly faded */
+}

@@ -1,4 +1,3 @@
-
 /* ----------------- logger ----------------- */
 const $log = document.getElementById('log');
 const $verbose = document.getElementById('verbose');
@@ -580,7 +579,7 @@ log(`Grouped into ${jobGroups.size} unique jobs.`, "ok");
         if (typeof meta.containsInvoiceIdx === "number" && meta.containsInvoiceIdx >= 0){
           let sawTrue = false, sawAnyExplicit = false;
           for (const { r } of recs){
-            const v = r[meta.containsInvoiceIdx];
+            const v = meta.containsInvoiceIdx >= 0 ? r[meta.containsInvoiceIdx] : undefined;
             if (String(v).trim() !== "") sawAnyExplicit = true;
             if (isTruthy(v)) sawTrue = true;
           }
@@ -778,7 +777,7 @@ function invoiceStatus(recs, meta){
       const invoicedDone    = invoicedRows.some(({r}) => {
         const pct = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
         const completedTruth = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
-        return completedTruth || (!isNaN(pct) && pct >= 100);
+        return completedTruth || (!isNaN(pct) && pct>=100);
       });
 
       // All-zero guard
@@ -1099,7 +1098,7 @@ if (debugPaid.length) lines.push(...debugPaid);
 });
 
 
-// --- FINAL ROW DETECTORS ---
+// --- FINAL ROW DETECTORS --- */
 function isFinalCompleteRow(title){
   const t = String(title || "").toLowerCase();
   return /100\s*%.*job\s*complete/.test(t) ||
@@ -1276,6 +1275,12 @@ function renderColumns(columns) {
       const d = document.createElement('div');
       d.className = 'item';
       d.textContent = formatJobName(item);
+
+      // NEW: click to toggle greyed-out + line-through
+      d.addEventListener('click', () => {
+        d.classList.toggle('item-done');
+      });
+
       list.appendChild(d);
     }
 
