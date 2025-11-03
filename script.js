@@ -1,3 +1,4 @@
+
 /* ----------------- logger ----------------- */
 const $log = document.getElementById('log');
 const $verbose = document.getElementById('verbose');
@@ -1411,4 +1412,3 @@ function hasFinalCompleteDone(records, info){
     return done === true || (!Number.isNaN(pct) && pct >= 100);
   });
 }
-
