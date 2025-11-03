@@ -1231,6 +1231,15 @@ function findHeader(firstRow, candidates, optional=false){
   }
   return optional ? -1 : -1;
 }
+function formatJobName(name) {
+  // Insert a space after leading numbers (e.g. "44Riverstone" → "44 Riverstone")
+  let formatted = String(name || "").trim().replace(/^(\d+)([A-Za-z])/, "$1 $2");
+
+  // Capitalize first letter of each word
+  formatted = formatted.replace(/\b\w/g, (c) => c.toUpperCase());
+
+  return formatted;
+}
 
 /* ----------------- UI helpers -------------- */
 function renderColumns(columns){
@@ -1245,7 +1254,12 @@ function renderColumns(columns){
     if (!col.items.length){
       const span=document.createElement('div'); span.className='muted'; span.textContent='(none)'; list.appendChild(span);
     } else {
-      for (const item of col.items){ const d = document.createElement('div'); d.className='item'; d.textContent = item; list.appendChild(d); }
+for (const item of col.items){
+  const d = document.createElement('div');
+  d.className = 'item';
+  d.textContent = formatJobName(item);
+  list.appendChild(d);
+}
     }
     div.appendChild(hdr); div.appendChild(list); $grid.appendChild(div);
   }
