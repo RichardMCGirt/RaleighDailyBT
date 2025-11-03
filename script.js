@@ -1232,46 +1232,92 @@ function findHeader(firstRow, candidates, optional=false){
   return optional ? -1 : -1;
 }
 function formatJobName(name) {
-  // Insert a space after leading numbers (e.g. "44Riverstone" → "44 Riverstone")
-  let formatted = String(name || "").trim().replace(/^(\d+)([A-Za-z])/, "$1 $2");
+  // Ensure safe string
+  let formatted = String(name || "").trim();
 
-  // Capitalize first letter of each word
-  formatted = formatted.replace(/\b\w/g, (c) => c.toUpperCase());
+  // Insert a space after leading numbers (e.g., "44Riverstone" → "44 Riverstone")
+  formatted = formatted.replace(/^(\d+)([A-Za-z])/, "$1 $2");
+
+  // Capitalize the first letter of each word
+  formatted = formatted.replace(/\b\w/g, c => c.toUpperCase());
 
   return formatted;
 }
 
+
 /* ----------------- UI helpers -------------- */
-function renderColumns(columns){
+function renderColumns(columns) {
   $grid.innerHTML = "";
-  for (const col of columns){
-    const div = document.createElement('div'); div.className = 'col';
-    const hdr = document.createElement('div'); hdr.className = 'hdr';
-    const left = document.createElement('div'); left.textContent = col.header;
-    const right = document.createElement('div'); right.className='muted'; right.textContent = col.items.length;
-    hdr.appendChild(left); hdr.appendChild(right);
-    const list = document.createElement('div'); list.className='list';
-    if (!col.items.length){
-      const span=document.createElement('div'); span.className='muted'; span.textContent='(none)'; list.appendChild(span);
-    } else {
-for (const item of col.items){
-  const d = document.createElement('div');
-  d.className = 'item';
-  d.textContent = formatJobName(item);
-  list.appendChild(d);
-}
+
+  // Filter out columns that have no items
+  const visibleColumns = columns.filter(c => Array.isArray(c.items) && c.items.length > 0);
+
+  for (const col of visibleColumns) {
+    const div = document.createElement('div');
+    div.className = 'col';
+
+    const hdr = document.createElement('div');
+    hdr.className = 'hdr';
+
+    const left = document.createElement('div');
+    left.textContent = col.header;
+
+    const right = document.createElement('div');
+    right.className = 'muted';
+    right.textContent = col.items.length;
+
+    hdr.appendChild(left);
+    hdr.appendChild(right);
+
+    const list = document.createElement('div');
+    list.className = 'list';
+
+    for (const item of col.items) {
+      const d = document.createElement('div');
+      d.className = 'item';
+      d.textContent = formatJobName(item);
+      list.appendChild(d);
     }
-    div.appendChild(hdr); div.appendChild(list); $grid.appendChild(div);
+
+    div.appendChild(hdr);
+    div.appendChild(list);
+    $grid.appendChild(div);
+  }
+
+  if (visibleColumns.length === 0) {
+    const msg = document.createElement('div');
+    msg.className = 'muted';
+    msg.textContent = '(No jobs to display)';
+    $grid.appendChild(msg);
   }
 }
 
-function buildAOA(columns){
-  const header1=[]; const header2=[];
-  for (const c of columns){ header1.push(c.header); header2.push("Key"); }
-  const maxLen = Math.max(0, ...columns.map(c=>c.items.length));
-  const rows=[]; for (let r=0;r<maxLen;r++){ const line=[]; for (const c of columns){ line.push(c.items[r] || ""); } rows.push(line); }
+
+function buildAOA(columns) {
+  const nonEmpty = columns.filter(c => Array.isArray(c.items) && c.items.length > 0);
+
+  const header1 = [];
+  const header2 = [];
+
+  for (const c of nonEmpty) {
+    header1.push(c.header);
+    header2.push("Key");
+  }
+
+  const maxLen = Math.max(0, ...nonEmpty.map(c => c.items.length));
+  const rows = [];
+
+  for (let r = 0; r < maxLen; r++) {
+    const line = [];
+    for (const c of nonEmpty) {
+      line.push(formatJobName(c.items[r] || ""));
+    }
+    rows.push(line);
+  }
+
   return [header1, header2, ...rows];
 }
+
 
 function downloadAOA(aoa){
   const ws = XLSX.utils.aoa_to_sheet(aoa);
