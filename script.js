@@ -1101,11 +1101,11 @@ if (debugPaid.length) lines.push(...debugPaid);
 // --- FINAL ROW DETECTORS ---
 function isFinalCompleteRow(title){
   const t = String(title || "").toLowerCase();
-  return t.includes("100% job complete") ||
-         t.includes("100% complete") ||
-         t.includes("job complete/inspected") ||
-         t.includes("job complete / inspected");
+  return /100\s*%.*job\s*complete/.test(t) ||
+         /job\s*complete\s*[/-]?\s*inspected/.test(t) ||
+         /final\b/.test(t);
 }
+
 function hasFinalCompleteDone(records, info){
   return Array.isArray(records) && records.some(({ r }) => {
     const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
@@ -1403,6 +1403,12 @@ function invoiceStatus(records, info){
 }
 
 function hasFinalCompleteDone(records, info){
-  const finalAliases = ["100% job complete", "final", "job complete/inspected"];
-  return anyDoneByTitle(records, info, finalAliases);
+  return Array.isArray(records) && records.some(({ r }) => {
+    const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
+    if (!isFinalCompleteRow(title)) return false;
+    const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+    const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+    return done === true || (!Number.isNaN(pct) && pct >= 100);
+  });
 }
+
