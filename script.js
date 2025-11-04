@@ -73,6 +73,14 @@ const TRADE_TOKEN_MAP = {
   "Louvered Wall": "louvered wall",
   "Gutters": "gutters"
 };
+// 🧩 Normalize job names consistently (spaces, casing)
+function normalizeJobName(name) {
+  return String(name || "")
+    .replace(/\s+/g, " ")   // collapse multiple spaces
+    .replace(/([0-9])([A-Za-z])/g, "$1 $2") // insert space between numbers and letters
+    .trim()
+    .toLowerCase();
+}
 
 function hasAnyCloseOutSoft(records, info){
   return records.some(({ r }) => {
@@ -169,7 +177,7 @@ function findUnpaidTrade(records, info){
   return null;
 }
 
-const READY_INVOICE_MODE = "either";
+const READY_INVOICE_MODE = "strict";
 const REQUIRE_INVOICE_PHRASE_FOR_BUCKET = false;
 
 const TRADE_ACTIVITY_KEYWORDS = {
@@ -377,6 +385,12 @@ function titleIndicatesTradeToPay(trade, records, info, tokens){
   vlog(`[ToPay?] ${trade} :: paidPending=${anyPaidPending} paidDone=${anyPaidDone} tradeComplete=${tradeComplete} closeOutDone=${closeOutDone} closeOutSoft=${closeOutSoft} requireComplete=${requireTradeComplete}`);
 
   return false;
+}
+function normalizeJobName(str){
+  return String(str)
+    .replace(/\s+/g, ' ')         // collapse extra spaces
+    .trim()
+    .toLowerCase();               // normalize case
 }
 
 // === NEW HIDE RULE ===
@@ -614,7 +628,7 @@ function titleMatchesAny(pats, title){
   if (!pats || !pats.length) return false;
   return pats.some(re => re.test(title));
 }
- function tradeIsFinished(trade, recs, meta){
+function tradeIsFinished(trade, recs, meta){
   const base = TRADE_COMPLETE_TITLE_PATTERNS[trade] || [];
   const pats = GLOBAL_FINISH_OK_FOR.has(trade)
     ? base.concat(TRADE_COMPLETE_TITLE_PATTERNS._global || [])
@@ -627,12 +641,14 @@ function titleMatchesAny(pats, title){
     const pct   = meta.percentCompleteIdx>=0 ? Number(r[meta.percentCompleteIdx]) : NaN;
 
     if (titleMatchesAny(pats, title)){
-      if (done === true) return true;
-      if (!isNaN(pct) && pct >= 100) soft = true;
+      if (done === true) return true;           // ✅ hard complete
+      if (!isNaN(pct) && pct >= 100) soft = true; // ✅ soft complete (100% but not ticked yet)
     }
   }
-  return soft;
+  return soft; // ✅ for trades, this is OK (lets trades show up in To Pay)
 }
+
+
 function paidStatus(trade, recs, meta){
   // Default: "Paid {Trade}"
   const defaultPattern = new RegExp("^paid\\s+"+ trade.replace(/\s+/g, "\\s+") +"\\b", "i");
@@ -706,19 +722,22 @@ if (tradesNeedingPayment.length >= 1){
     }));
   }
 
-  // Invoiced status + final status
-  const inv = invoiceStatus(records, info);
-  const finalDoneNow = hasFinalCompleteDone(records, info); // already defined below
+// Invoiced status + final status
+// Invoiced status + final status
+const inv = invoiceStatus(records, info);
+const finalDoneNow = hasFinalDone(records, info); // uses strict Completed=TRUE
 
-  // ✅ ALSO show in Close if BOTH invoice & final are fully completed
-  if (inv.present && inv.done && finalDoneNow){
-    (result.duplicates ??= []).push({
-      bucket: "Jobs To Close",
-      reason: `Invoice completed and final complete; also pending trade payment`,
-      trade:  null,
-      extra:  { multiTradesPending: sorted }
-    });
-  }
+// ✅ ALSO show in Close if BOTH invoice & final are fully completed
+if (inv.present && inv.done && finalDoneNow){
+  (result.duplicates ??= []).push({
+    bucket: "Jobs To Close",
+    reason: `Invoice completed and 100% Job Complete marked done; also pending trade payment`,
+    trade:  null,
+    extra:  { multiTradesPending: sorted }
+  });
+}
+
+
 
   // ✅ NEW: ALSO show in Jobs To Invoice when either:
   //   - Invoiced is present but not completed, or
@@ -737,6 +756,24 @@ if (tradesNeedingPayment.length >= 1){
   }
 
   return result;
+}
+function hasFinalDone(records, info) {
+  return hasFinalCompleteDone(records, info);
+}
+
+function hasInvoicedDone(records, info) {
+  if (!Array.isArray(records)) return false;
+  return records.some(({ r }) => {
+    const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
+    // Look for rows that start with or include "Invoiced"
+    if (!/\binvoiced\b/i.test(title)) return false;
+
+    const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+    const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+
+    // ✅ Treat either Completed = true or PercentComplete >= 100 as “done”
+    return done === true || (!Number.isNaN(pct) && pct >= 100);
+  });
 }
 
 // Invoiced present/done?
@@ -797,40 +834,65 @@ function invoiceStatus(recs, meta){
           }
         }
       }
-
-      // PRIORITY 1: TRADES
-     let primaryTradeHit = null;
+// PRIORITY 1: TRADES
+// PRIORITY 1: TRADES
+let primaryTradeHit = null;
 for (const trade of TRADES){
-  if (IGNORED_TRADES.has(String(trade).toLowerCase())) continue;
+  const tradeKey = String(trade).toLowerCase();
+
+  if (IGNORED_TRADES.has(tradeKey)) continue;
+
+  // 🚫 Special rule: Screen Porch complete but no "Paid Screen Porch" → suppress Screen Porch To Pay
+  if (tradeKey === "screen porch") {
+    const hasComplete = hasTradeCompleteSignal("Screen Porch", records, info);
+    const hasPaid     = paidTitlePresent("Screen Porch", records, info);
+    if (hasComplete && !hasPaid) {
+      vlog(`[Skip Rule] ${job}: Screen Porch complete but no "Paid Screen Porch" row → suppress Screen Porch To Pay`);
+      continue;
+    }
+  }
+
+  // ✅ Trade must be finished (using trade-level patterns)
   if (!tradeIsFinished(trade, records, info)) continue;
 
-  // ✅ NEW GUARD — skip any finished trade that already has a "Paid" row (even if partially marked)
-  if (tradeIsFinished(trade, records, info) && paidTitlePresent(trade, records, info)) {
-    vlog(`[Skip] ${trade} already finished & has paid title → hide from all To Pay buckets`);
+  const paidTruth = tradePaidTruthiness(trade, records, info);
+  if (paidTruth === true) {
+    // already paid → do not show in any To Pay bucket
     continue;
   }
 
-  const paidTruth = tradePaidTruthiness(trade, records, info);
-  if (paidTruth === true) continue;
-  if (paidTruth === false){
-          if (String(trade).toLowerCase()==="porch" && typeof HIDE_PORCH_TO_PAY!=="undefined" && HIDE_PORCH_TO_PAY){
-            // suppressed
-          } else {
-            primaryTradeHit = { bucket:`${trade} To Pay`, reason:`Paid ${trade} = FALSE (finished)`, trade, extra:null };
-            break;
-          }
-        } else {
-          const tokens = tokensFor(trade);
-          if (titleIndicatesTradeToPay(trade, records, info, tokens)){
-            if (String(trade).toLowerCase()==="porch" && typeof HIDE_PORCH_TO_PAY!=="undefined" && HIDE_PORCH_TO_PAY){
-              // suppressed
-            } else {
-              primaryTradeHit = { bucket:`${trade} To Pay`, reason:`${trade} payment needed (title/implicit, finished)`, trade, extra:null };
-              break;
-            }
-          }
-        }
+  if (paidTruth === false) {
+    // explicit “Paid {Trade} = FALSE”
+    if (tradeKey === "porch" && typeof HIDE_PORCH_TO_PAY !== "undefined" && HIDE_PORCH_TO_PAY){
+      // suppressed by flag
+    } else {
+      primaryTradeHit = {
+        bucket: `${trade} To Pay`,
+        reason: `Paid ${trade} = FALSE (finished)`,
+        trade,
+        extra: null
+      };
+      break;
+    }
+  } else {
+    // no explicit paid flag — fall back to title-based signals (e.g. “Paid Columns Pending”)
+    const tokens = tokensFor(trade);
+    if (titleIndicatesTradeToPay(trade, records, info, tokens)) {
+      if (tradeKey === "porch" && typeof HIDE_PORCH_TO_PAY !== "undefined" && HIDE_PORCH_TO_PAY){
+        // suppressed by flag
+      } else {
+        primaryTradeHit = {
+          bucket: `${trade} To Pay`,
+          reason: `${trade} payment needed (title/implicit, finished)`,
+          trade,
+          extra: null
+        };
+        break;
       }
+    }
+  }
+}
+
 
       // INVOICE
       let invoiceNeeded = false;
@@ -899,9 +961,21 @@ for (const trade of TRADES){
       if (primaryTradeHit) return primaryTradeHit;
       if (invoiceNeeded)  return { bucket:"Jobs To Invoice", reason:invoiceReason, trade:null, extra:null };
 
-      if (finalDone && invoicedDone){
-        return { bucket:"Jobs To Close", reason:"Final completion row done and invoice completed; all trades paid", trade:null, extra:null };
-      }
+  
+// ✅ Close ONLY if: invoice done AND final row done
+const invoiceDone = hasInvoicedDone(records, info);
+const finalDoneHard = hasFinalDone(records, info);
+
+if (invoiceDone && finalDoneHard) {
+  return {
+    bucket: "Jobs To Close",
+    reason: "Invoice completed and final complete; job can be closed even if some trades still need payment",
+  };
+}
+
+
+
+
       if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_LIEN))){
         return { bucket:"Liens Needed", reason:"lien phrase found", trade:null, extra:null };
       }
@@ -978,8 +1052,9 @@ columns.push({ header:"Liens Needed",    items: lien });
 });
 
 /* ----------------- Explain panel ----------- */
+/* ----------------- Explain panel ----------- */
 $inspectBtn.addEventListener('click', ()=>{
-  if (!state){
+  if (!state) {
     $inspectOut.textContent = "Run Compute first.";
     return;
   }
@@ -989,141 +1064,130 @@ $inspectBtn.addEventListener('click', ()=>{
     .map(s => s.trim())
     .filter(Boolean);
 
-  if (!targets.length){
+  if (!targets.length) {
     $inspectOut.textContent = "Paste one job per line.";
     return;
   }
 
   const { jobGroups, assignment, info } = state;
-
   const lines = [];
   lines.push("Explain (priority = Trades → Invoice → Close → Lien)");
   lines.push("");
   lines.push("Legend: ✅ done • 🟡 present, not done • ⛔ unpaid • 📄 invoiced row");
   lines.push("");
 
-  function rowMini(r){
-    const title = info.titleIdx>=0 ? safeCell(r[info.titleIdx]) : "";
-    const phase = info.phaseIdx>=0 ? safeCell(r[info.phaseIdx]) : "";
-    const pct   = info.percentCompleteIdx>=0 ? safeCell(r[info.percentCompleteIdx]) : "";
-    const done  = info.completedIdx>=0 ? safeCell(r[info.completedIdx]) : "";
-    return `"${title}" — ${phase} — %=${pct || 0} — Completed=${done || ""}`;
-  }
+  // 🔍 Loop through each job typed into the explain box
+  for (const rawJob of targets) {
+    const displayName = rawJob.trim();
+    const jobKey = makeJobKey(displayName);   // normalize casing/spaces
+    if (!jobKey) continue;
 
-  for (const job of targets){
-    // Use the same key logic as the main grouping:
-    const key = makeJobKey(job);
-    const recs = jobGroups.get(key);
-
-    if (!recs){
-      lines.push(`• ${job} — NOT FOUND`);
+    const recs = jobGroups.get(jobKey);
+    if (!recs) {
+      lines.push(`• ${displayName} — NOT FOUND`);
       lines.push("");
       continue;
     }
 
-    const pick = assignment.get(key) || { bucket:null, reason:"(none)" };
+    const pick = assignment.get(jobKey) || { bucket: null, reason: "(none)" };
+    const displaySafe = recs[0]?.rawJob || displayName;
 
-    // Show the nice name from the data if available:
-    const displayName = recs[0]?.rawJob || job;
+    // Header for this job
+    lines.push(`• ${displaySafe}`);
+    lines.push(`  Bucket(s): ${pick.bucket || "(none)"}  |  Reason: ${pick.reason || "(none)"}`);
 
-    lines.push(`• ${displayName}`);
-    lines.push(`  Bucket: ${pick.bucket || "(none)"}  |  Reason: ${pick.reason}`);
-    const aliases = ALIASES.columns;
-lines.push(`  Debug Aliases:`);
-lines.push(`    Paid → ${aliases.paid.join(", ")}`);
-lines.push(`    Complete → ${aliases.complete.join(", ")}`);
-
-const debugPaid = recs
-  .map(({ r }) => {
-    const rawTitle = safeCell(r[info.titleIdx]);
-    const normTitle = norm(rawTitle);
-    const matched = aliases.paid.some(a => normTitle.includes(norm(a)));
-    return `    ${matched ? "✅" : "❌"} ${rawTitle}`;
-  })
-  .filter(Boolean);
-
-if (debugPaid.length) lines.push(...debugPaid);
-
-
-    const invoicedRows = recs.filter(({r}) =>
-      String(safeCell(r[info.titleIdx])).toLowerCase().includes("invoiced")
-    );
-
-    if (invoicedRows.length){
-      const flag = invoicedRows.some(({r})=>{
-        const pct = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
-        const done = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
-        return done || (!isNaN(pct) && pct>=100);
-      }) ? "✅" : "🟡";
-      lines.push(`  ${flag} 📄 Invoiced row present (${invoicedRows.length})`);
+    // 🧩 Helper to print a short version of each record
+    function rowMini(r) {
+      const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
+      const phase = info.phaseIdx >= 0 ? safeCell(r[info.phaseIdx]) : "";
+      const pct   = info.percentCompleteIdx >= 0 ? safeCell(r[info.percentCompleteIdx]) : "";
+      const done  = info.completedIdx >= 0 ? safeCell(r[info.completedIdx]) : "";
+      return `"${title}" — ${phase} — %=${pct || 0} — Completed=${done || ""}`;
     }
 
-    const tradeHints = [];
-    for (const t of TRADES){
-      const token = buildTradeTitlePattern(t);
-      const paidRx = new RegExp(`\\bpaid\\b[^a-z0-9]*${token}`, 'i');
-
-      const paidAny = recs.some(({r}) => paidRx.test(safeCell(r[info.titleIdx])));
-      if (paidAny){
-        const paidDone = recs.some(({r})=>{
-          const title = safeCell(r[info.titleIdx]);
-          if (!paidRx.test(title)) return false;
-          const pct = info.percentCompleteIdx>=0 ? Number(r[info.percentCompleteIdx]) : NaN;
-          const done = info.completedIdx>=0 ? isTruthy(r[info.completedIdx]) : false;
-          return done || (!isNaN(pct) && pct>=100);
-        });
-        tradeHints.push(`${paidDone ? "✅" : "🟡"} Paid ${t}`);
-      }
-
-      const complete = hasTradeCompleteSignal(t, recs, info);
-      if (complete) tradeHints.push(`✅ ${t} Complete`);
+    // 🔧 Show debug aliases (optional)
+    lines.push("  Debug Aliases:");
+    for (const [alias, terms] of Object.entries(ALIAS_GROUPS)) {
+      lines.push(`    ${alias} → ${terms.join(", ")}`);
     }
 
-    if (tradeHints.length) {
-      lines.push(`  Trades: ${tradeHints.join(" • ")}`);
+    // 🔍 Show invoiced row count (if any)
+    const invoicedRows = recs.filter(({ r }) => {
+      const val = info.titleIdx >= 0 ? String(r[info.titleIdx]).toLowerCase() : "";
+      return val.includes("invoiced");
+    });
+    if (invoicedRows.length) {
+      lines.push(`  🟡 📄 Invoiced row present (${invoicedRows.length})`);
     }
 
-    const shortlist = recs
-      .slice(0, 5)
-      .map(({r}) => `  - ${rowMini(r)}`);
-
-    if (shortlist.length) {
-      lines.push("  Key rows:");
-      lines.push(...shortlist);
+    // 🔍 Show key rows
+    lines.push("  Key rows:");
+    for (const { r } of recs) {
+      lines.push("  - " + rowMini(r));
     }
-    lines.push("");
+
+    lines.push(""); // blank line between jobs
   }
 
+  // Output to the text area
   $inspectOut.textContent = lines.join("\n");
 });
 
-
 // --- FINAL ROW DETECTORS --- */
-function isFinalCompleteRow(title){
+// --- FINAL ROW DETECTORS --- */
+function isFinalCompleteRow(title) {
   const t = String(title || "").toLowerCase();
   return /100\s*%.*job\s*complete/.test(t) ||
          /job\s*complete\s*[/-]?\s*inspected/.test(t) ||
-         /final\b/.test(t);
+         /\bfinal\b/.test(t);
 }
 
-function hasFinalCompleteDone(records, info){
-  return Array.isArray(records) && records.some(({ r }) => {
-    const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
-    if (!isFinalCompleteRow(title)) return false;
-    const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
-    const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
-    return done === true || (!Number.isNaN(pct) && pct >= 100);
+// ✅ FINAL = only when Completed is TRUE (checkbox / TRUE / 1 / etc.)
+function hasFinalCompleteDone(records, info) {
+  if (!Array.isArray(records)) return false;
+
+  return records.some(({ r }) => {
+    const rawTitle = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
+    const title    = rawTitle.toLowerCase();
+    const done     = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+    const pct      = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+
+    if (title.includes("100% job complete")) {
+      return !Number.isNaN(pct) && pct >= 100;
+    }
+    if (title.includes("job complete/inspected") || title.includes("final")) {
+      return done === true;
+    }
+    return false;
   });
 }
-function hasFinalCompletePresentButNotDone(records, info){
-  return Array.isArray(records) && records.some(({ r }) => {
-    const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
-    if (!isFinalCompleteRow(title)) return false;
-    const pct  = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
-    const done = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
-    return !(done === true || (!Number.isNaN(pct) && pct >= 100));
+
+// ✅ FINAL present but not done = final row exists and Completed is NOT TRUE
+function hasFinalCompletePresentButNotDone(records, info) {
+  if (!Array.isArray(records)) return false;
+
+  return records.some(({ r }) => {
+    const rawTitle = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
+    const title    = rawTitle.toLowerCase();
+    const done     = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+    const pct      = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+
+    if (title.includes("100% job complete")) {
+      return !( !Number.isNaN(pct) && pct >= 100 );
+    }
+    if (title.includes("job complete/inspected") || title.includes("final")) {
+      return !done;
+    }
+    return false;
   });
 }
+
+// Optional tiny alias so your other code can call hasFinalDone(...)
+function hasFinalDone(records, info) {
+  return hasFinalCompleteDone(records, info);
+}
+
+
 
 /* ----------------- header detection -------- */
 function chooseHeaderRowWithFallback(aoa, scanRows=10){
@@ -1323,6 +1387,13 @@ function buildAOA(columns) {
   return [header1, header2, ...rows];
 }
 
+// Aliases used for debug display in Explain panel
+const ALIAS_GROUPS = {
+  Paid: ["paid column", "paid columns"],
+  Complete: ["column complete", "columns complete", "column completed", "columns completed"],
+  Invoiced: ["invoice", "invoiced", "invoicing"],
+  "Job Complete": ["100% job complete", "job complete/inspected"]
+};
 
 function downloadAOA(aoa){
   const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -1434,11 +1505,17 @@ function getTradesToPay(records, info) {
   return trades;
 }
 
-function makeJobKey(rawJob, extraFields = {}){
-  // Wrapper so we can keep all key logic in one place.
-  // rawJob is whatever is in the job column (e.g., "2 Sugar Creek").
-  return getJobKey(rawJob, extraFields);
+// 🧩 Improved key generator for consistent job name matching
+function makeJobKey(str) {
+  if (!str) return "";
+
+  return String(str)
+    .replace(/\s+/g, " ")                 // collapse multiple spaces
+    .replace(/([0-9])([A-Za-z])/g, "$1 $2") // insert missing space between numbers & letters
+    .trim()
+    .toLowerCase();
 }
+
 
 function getJobKey(jobName, extraFields = {}){
   const name = norm(jobName).replace(/\s+/g, " "); // collapse spaces
@@ -1468,12 +1545,3 @@ function invoiceStatus(records, info){
   return { present, done };
 }
 
-function hasFinalCompleteDone(records, info){
-  return Array.isArray(records) && records.some(({ r }) => {
-    const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
-    if (!isFinalCompleteRow(title)) return false;
-    const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
-    const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
-    return done === true || (!Number.isNaN(pct) && pct >= 100);
-  });
-}
