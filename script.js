@@ -1439,34 +1439,23 @@ function isFalseComplete(title, done){ return (title.includes("complete") || tit
 function anyDoneByTitle(records, info, aliases) {
   const aliasNorm = (aliases || []).map(a => norm(a));
 
-  const debug = []; // collect diagnostics
   for (const { r } of records) {
     const { title, done, pct } = readRow(r, info);
     const matched = aliasNorm.some(a => title.includes(a));
+    if (!matched) continue;
 
-    debug.push({
-      title,
-      done,
-      pct,
-      matchedAliases: aliasNorm.filter(a => title.includes(a))
-    });
+    // Ignore “fake complete” rows
+    if (isFalseComplete(title, done)) continue;
 
-    if (matched) {
-      if (isFalseComplete(title, done)) continue;
-      if (rowIsDone(done, pct)) {
-        console.groupCollapsed("✅ anyDoneByTitle → match");
-        console.table(debug);
-        console.groupEnd();
-        return true;
-      }
+    if (rowIsDone(done, pct)) {
+      return true;
     }
   }
 
-  console.groupCollapsed("🧩 anyDoneByTitle → no match");
-  console.table(debug);
-  console.groupEnd();
   return false;
 }
+
+
 
 
 
@@ -1512,9 +1501,19 @@ function getTradesToPay(records, info) {
   }
 
   // Only flag when finished but not paid
-  if (colFinished && !colPaid) {
-    trades.push("Columns");
-  }
+ // --- Guard: Only flag Columns if a subcontractor was actually involved ---
+const hasSubInvolved = records.some(({ r }) => {
+  const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]).toLowerCase() : "";
+  return title.includes("paid siding sub") || title.includes("subcontractor");
+});
+
+// Only mark Columns To Pay if finished, not paid, and sub was involved
+if (colFinished && !colPaid && hasSubInvolved) {
+  trades.push("Columns");
+} else if (colFinished && !colPaid && !hasSubInvolved) {
+  vlog("[Skip Columns] finished but no subcontractor involvement → skip Columns To Pay");
+}
+
 
   // Defensive: remove Columns if any Paid-row exists (even incomplete)
   if (colPaid) {
