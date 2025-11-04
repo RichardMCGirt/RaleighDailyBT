@@ -59,8 +59,10 @@ const TRADE_GROUPS = {
   rails:        ["rail", "rails"],
   paint:        ["paint", "painter", "painting"],
   housewrap:    ["house wrap","housewrap"],
-  "screen porch": ["screen porch", "screened porch"]
+  "screen porch": ["screen porch", "screened porch"],
+  columns:      ["column", "columns"]           // 👈 NEW: singular + plural
 };
+
 // Map pretty UI labels in TRADES → keys in TRADE_GROUPS (or fallbacks)
 const TRADE_TOKEN_MAP = {
   "Siding": "siding",
@@ -324,12 +326,6 @@ function hasTradeCompleteSignal(trade, records, info){
   });
 }
 
-function paidTitlePresent(trade, records, info){
-  if (info.titleIdx < 0) return false;
-  const token = buildTradeTitlePattern(trade);
-  const paidRx = new RegExp(`\\bpaid\\b[^a-z0-9]*${token}`, 'i');
-  return records.some(({r}) => paidRx.test(safeCell(r[info.titleIdx])));
-}
 
 function paidTitleUnfinished(trade, records, info){
   if (info.titleIdx < 0) return false;
@@ -391,6 +387,17 @@ function normalizeJobName(str){
     .replace(/\s+/g, ' ')         // collapse extra spaces
     .trim()
     .toLowerCase();               // normalize case
+}
+function paidTitlePresent(trade, records, info) {
+  const t = String(trade || "").toLowerCase();
+  return records.some(({ r }) => {
+    const title = safeCell(r[info.titleIdx]).toLowerCase();
+    const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+    const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+    // must match "Paid <trade>" and actually be done (Completed=TRUE or %>=100)
+    return title.includes("paid") && title.includes(t) &&
+           (done === true || (!Number.isNaN(pct) && pct >= 100));
+  });
 }
 
 // === NEW HIDE RULE ===
@@ -837,10 +844,18 @@ function invoiceStatus(recs, meta){
 // PRIORITY 1: TRADES
 // PRIORITY 1: TRADES
 let primaryTradeHit = null;
-for (const trade of TRADES){
+for (const trade of TRADES) {
   const tradeKey = String(trade).toLowerCase();
 
+  // Skip globally ignored trades
   if (IGNORED_TRADES.has(tradeKey)) continue;
+
+  // ✅ NEW: require activity for this trade (so we don't invent "Siding To Pay"
+  // on jobs that only have columns / porch / etc.)
+  if (!hasTradeActivity(trade, records, info)) {
+    vlog(`[Skip Trade] ${job}: no activity for ${trade}`);
+    continue;
+  }
 
   // 🚫 Special rule: Screen Porch complete but no "Paid Screen Porch" → suppress Screen Porch To Pay
   if (tradeKey === "screen porch") {
@@ -853,18 +868,22 @@ for (const trade of TRADES){
   }
 
   // ✅ Trade must be finished (using trade-level patterns)
-  if (!tradeIsFinished(trade, records, info)) continue;
+  if (!tradeIsFinished(trade, records, info)) {
+    continue;
+  }
 
   const paidTruth = tradePaidTruthiness(trade, records, info);
   if (paidTruth === true) {
     // already paid → do not show in any To Pay bucket
+    vlog(`[Skip Trade] ${job}: ${trade} already paid (Paid column / flag)`);
     continue;
   }
 
   if (paidTruth === false) {
     // explicit “Paid {Trade} = FALSE”
-    if (tradeKey === "porch" && typeof HIDE_PORCH_TO_PAY !== "undefined" && HIDE_PORCH_TO_PAY){
+    if (tradeKey === "porch" && typeof HIDE_PORCH_TO_PAY !== "undefined" && HIDE_PORCH_TO_PAY) {
       // suppressed by flag
+      vlog(`[Skip Trade] ${job}: ${trade} to pay suppressed by HIDE_PORCH_TO_PAY`);
     } else {
       primaryTradeHit = {
         bucket: `${trade} To Pay`,
@@ -878,8 +897,8 @@ for (const trade of TRADES){
     // no explicit paid flag — fall back to title-based signals (e.g. “Paid Columns Pending”)
     const tokens = tokensFor(trade);
     if (titleIndicatesTradeToPay(trade, records, info, tokens)) {
-      if (tradeKey === "porch" && typeof HIDE_PORCH_TO_PAY !== "undefined" && HIDE_PORCH_TO_PAY){
-        // suppressed by flag
+      if (tradeKey === "porch" && typeof HIDE_PORCH_TO_PAY !== "undefined" && HIDE_PORCH_TO_PAY) {
+        vlog(`[Skip Trade] ${job}: ${trade} To Pay suppressed by HIDE_PORCH_TO_PAY (title-based)`);
       } else {
         primaryTradeHit = {
           bucket: `${trade} To Pay`,
@@ -892,6 +911,7 @@ for (const trade of TRADES){
     }
   }
 }
+
 
 
       // INVOICE
