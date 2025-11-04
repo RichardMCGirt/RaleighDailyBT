@@ -13,6 +13,15 @@
     <div class="row">
       <!-- allow multiple files -->
       <input id="fileInput" type="file" accept=".xlsx,.xls" multiple />
+
+      <!-- NEW: Location dropdown -->
+      <label for="locationSelect">Location:</label>
+      <select id="locationSelect">
+        <option value="Raleigh">Raleigh</option>
+        <option value="Charlotte">Charlotte</option>
+        <option value="Myrtle Beach">Myrtle Beach</option>
+      </select>
+
       <button id="runBtn" class="primary">Compute</button>
       <button id="downloadBtn" disabled>Download Excel (MM-dd-yyyy)</button>
       <span id="countBadge" class="pill">0 rows</span>
@@ -43,7 +52,7 @@
     <div id="inspectOut" class="explain" style="margin-top:10px;"></div>
   </div>
 
-    <div id="log" class="log"></div>
+  <div id="log" class="log"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="script.js"></script>

@@ -6,10 +6,33 @@ function vlog(msg, cls=""){ if($verbose.checked) log(msg, cls); }
 function sep(){ vlog("—".repeat(72)); }
 
 /* ----------------- helpers ---------------- */
-function safeCell(v){ return v==null ? "" : (typeof v==="string"? v : String(v)); }
-function norm(s){ return String(s||"").toLowerCase().replace(/[^a-z0-9]+/g,""); }
-function isTruthy(v){ const t=String(v).trim().toLowerCase(); if (t==="") return false; return ["true","1","yes","y","to pay","pay","x","✓"].includes(t) || (t!=="false"&&t!=="0"&&t!=="no"); }
-function isFalse(v){ const t=String(v).trim().toLowerCase(); return t==="false"||t==="0"||t==="no"; }
+function safeCell(v) {
+  if (v == null) return "";
+  // Handle booleans explicitly
+  if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
+  // Otherwise convert everything to trimmed string
+  return String(v).trim();
+}function norm(s){ return String(s||"").toLowerCase().replace(/[^a-z0-9]+/g,""); }
+function isTruthy(v) {
+  if (v == null) return false;
+
+  // Handle boolean values directly
+  if (typeof v === "boolean") return v === true;
+
+  const t = String(v).trim().toLowerCase();
+  if (t === "") return false;
+
+  return [
+    "true",
+    "1",
+    "yes",
+    "y",
+    "to pay",
+    "pay",
+    "x",
+    "✓"
+  ].includes(t);
+}function isFalse(v){ const t=String(v).trim().toLowerCase(); return t==="false"||t==="0"||t==="no"; }
 function dateStamp(){ const d=new Date(); const mm=String(d.getMonth()+1).padStart(2,'0'); const dd=String(d.getDate()).padStart(2,'0'); const yyyy=String(d.getFullYear()); return `${mm}-${dd}-${yyyy}`; }
 function colLetterFromIndex(i){ let n=i+1,s=""; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=Math.floor((n-1)/26);} return s; }
 function dumpRow(label, row, n=30){ const cells=(row||[]).slice(0,n).map((v,i)=>`${colLetterFromIndex(i)}:${safeCell(v)}`); vlog(`${label}: ${cells.join(" | ")}`); }
@@ -38,6 +61,7 @@ const $grid = document.getElementById('grid');
 const $inspectInput = document.getElementById('inspectInput');
 const $inspectBtn = document.getElementById('inspectBtn');
 const $inspectOut = document.getElementById('inspectOut');
+const $location = document.getElementById('locationSelect');
 
 const IGNORED_TRADES = new Set(["housewrap", "porch"]); // never surface these trades in UI
 const STRICT_COMPLETION_TRADES = new Set(["porch", "screen porch", "columns"]);
@@ -238,6 +262,30 @@ function anyUnpaidFinishedTrade(records, info){
   }
   return false;
 }
+function parseJobParts(str) {
+  const s = String(str || "").trim();
+  const m = s.match(/^(\d+)\s*(.*)$/);
+  if (m) {
+    return {
+      house: parseInt(m[1], 10),
+      street: m[2].trim().toLowerCase()
+    };
+  }
+  return { house: NaN, street: s.toLowerCase() };
+}
+
+function compareJobsByStreet(a, b) {
+  const pa = parseJobParts(a);
+  const pb = parseJobParts(b);
+
+  const cmpStreet = pa.street.localeCompare(pb.street, undefined, { sensitivity: "base" });
+  if (cmpStreet !== 0) return cmpStreet;
+
+  if (!isNaN(pa.house) && !isNaN(pb.house)) return pa.house - pb.house;
+
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+}
+
 
 function containsInvoiceSignal(records, info){
   if (typeof info.containsInvoiceIdx === "number" && info.containsInvoiceIdx >= 0){
@@ -292,6 +340,80 @@ function containsAny(txt, arr){
 
 function safeSome(arr, pred){
   return Array.isArray(arr) ? arr.some(pred) : false;
+}
+function decideForJob(job, records) {
+  // Default decision object structure
+  const result = {
+    bucket: null,
+    reason: "",
+    trade: null,
+    extra: null,
+    duplicates: []
+  };
+
+  // === SAMPLE CLASSIFICATION LOGIC ===
+  // (You can refine this later if you have more rules)
+  const info = state?.info || {};
+  const txts = records.map(({ r }) =>
+    [r[info.phaseIdx], r[info.titleIdx], r[info.allNotesIdx]]
+      .filter(Boolean)
+      .join(" | ")
+      .toLowerCase()
+  );
+
+  // --- Lien detection ---
+  if (txts.some(s => s.includes("lien"))) {
+    result.bucket = "Liens Needed";
+    result.reason = "Lien phrase found";
+    return result;
+  }
+
+  // --- Invoice detection ---
+  if (txts.some(s => s.includes("invoice") || s.includes("invoiced"))) {
+    result.bucket = "Jobs To Invoice";
+    result.reason = "Invoice phrase found";
+    return result;
+  }
+
+ // --- Close-out detection ---
+{
+  const invoiceRowDone = records.some(({ r }) => {
+    const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]).toLowerCase() : "";
+    const pct   = info.percentCompleteIdx >= 0 ? numberish(r[info.percentCompleteIdx]) : NaN;
+    return title.includes("invoice") && !Number.isNaN(pct) && pct >= 100;
+  });
+
+  const finalRowDone = records.some(({ r }) => {
+    const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]).toLowerCase() : "";
+    const pct   = info.percentCompleteIdx >= 0 ? numberish(r[info.percentCompleteIdx]) : NaN;
+    return (
+      (title.includes("100% job complete") || title.includes("job complete/inspected")) &&
+      !Number.isNaN(pct) && pct >= 100
+    );
+  });
+
+  if (invoiceRowDone && finalRowDone) {
+    result.bucket = "Jobs To Close";
+    result.reason = "Invoice = 100 % and 100 % Job Complete = 100 % → ready to close";
+    return result;
+  }
+}
+
+
+
+
+  // --- Trade to pay detection ---
+  const unpaid = findUnpaidTrade(records, info);
+  if (unpaid) {
+    result.bucket = unpaid.bucket;
+    result.reason = unpaid.reason;
+    result.trade  = unpaid.trade;
+    return result;
+  }
+
+  // Nothing matched
+  result.reason = "No matching rule";
+  return result;
 }
 
 function reEscape(s){ return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
@@ -399,7 +521,7 @@ function paidTitlePresent(trade, records, info) {
            (done === true || (!Number.isNaN(pct) && pct >= 100));
   });
 }
-
+  
 // === NEW HIDE RULE ===
 function jobShouldBeHiddenForZeroPercents(records, info){
   if (info.percentCompleteIdx < 0) return false;
@@ -456,92 +578,196 @@ $file.addEventListener('change', async ()=>{
 });
 
 /* ----------------- main ------------------- */
-$run.addEventListener('click', ()=>{
-  try{
-    if (!parsedSheets.length) throw new Error("Please upload one or more workbooks first.");
+$run.addEventListener('click', () => {
+  // reset verbose-limit for this run
+  VLOG_COUNT = 0;
 
-    // Use the first file's header row for column detection
+  try {
+    if (!parsedSheets.length) {
+      throw new Error("Please upload one or more workbooks first.");
+    }
+      // Use the first file's header row for column detection
     const primary = parsedSheets[0];
     const headerRow = primary.aoa[primary.headerIndex] || [];
-    dumpRow(`Chosen header row ${primary.headerIndex+1} (raw)`, headerRow, 30);
-    dumpRow(`Chosen header row ${primary.headerIndex+1} (normalized)`, headerRow.map(norm), 30);
+    dumpRow(`Chosen header row ${primary.headerIndex + 1} (raw)`, headerRow, 30);
+    dumpRow(`Chosen header row ${primary.headerIndex + 1} (normalized)`, headerRow.map(norm), 30);
 
     const info = detectColumnsFrom(headerRow);
-    info.headerRowIndex = primary.headerIndex; 
+    info.headerRowIndex = primary.headerIndex;
     info.headerReason = primary.headerReason;
+window.info = info;
 
     const mapLines = [];
     mapLines.push(`Job (key) -> ${colLetterFromIndex(info.keyIdx)} (${info.keyIdx})`);
-    if (info.phaseIdx>=0) mapLines.push(`Phase -> ${colLetterFromIndex(info.phaseIdx)} (${info.phaseIdx}) [PRIMARY STATUS]`);
-    if (info.titleIdx>=0) mapLines.push(`Title -> ${colLetterFromIndex(info.titleIdx)} (${info.titleIdx})`);
-    if (info.allNotesIdx>=0) mapLines.push(`All Notes -> ${colLetterFromIndex(info.allNotesIdx)} (${info.allNotesIdx})`);
-    if (info.completedIdx>=0) mapLines.push(`Completed -> ${colLetterFromIndex(info.completedIdx)} (${info.completedIdx})`);
-    if (info.percentCompleteIdx>=0) mapLines.push(`PercentComplete -> ${colLetterFromIndex(info.percentCompleteIdx)} (${info.percentCompleteIdx})`);
-    for (const t of TRADES){
-      const p = info.paidByTrade[t]; const q = info.toPayByTrade[t];
-      if (p>=0) mapLines.push(`Paid ${t} -> ${colLetterFromIndex(p)} (${p})`);
-      if (q>=0) mapLines.push(`${t} To Pay -> ${colLetterFromIndex(q)} (${q})`);
+    if (info.phaseIdx >= 0) mapLines.push(`Phase -> ${colLetterFromIndex(info.phaseIdx)} (${info.phaseIdx}) [PRIMARY STATUS]`);
+    if (info.titleIdx >= 0) mapLines.push(`Title -> ${colLetterFromIndex(info.titleIdx)} (${info.titleIdx})`);
+    if (info.allNotesIdx >= 0) mapLines.push(`All Notes -> ${colLetterFromIndex(info.allNotesIdx)} (${info.allNotesIdx})`);
+    if (info.completedIdx >= 0) mapLines.push(`Completed -> ${colLetterFromIndex(info.completedIdx)} (${info.completedIdx})`);
+    if (info.percentCompleteIdx >= 0) mapLines.push(`PercentComplete -> ${colLetterFromIndex(info.percentCompleteIdx)} (${info.percentCompleteIdx})`);
+    for (const t of TRADES) {
+      const p = info.paidByTrade[t];
+      const q = info.toPayByTrade[t];
+      if (p >= 0) mapLines.push(`Paid ${t} -> ${colLetterFromIndex(p)} (${p})`);
+      if (q >= 0) mapLines.push(`${t} To Pay -> ${colLetterFromIndex(q)} (${q})`);
     }
-    sep(); vlog("Column mappings (from first file):\n" + mapLines.join("\n"), "ok"); sep();
+    sep();
+    vlog("Column mappings (from first file):\n" + mapLines.join("\n"), "ok");
+    sep();
 
     // Merge rows from ALL files (skip each file's header region)
     const allRows = [];
-    for (const pf of parsedSheets){
+    for (const pf of parsedSheets) {
       const rows = pf.aoa.slice(pf.headerIndex + 1);
       allRows.push(...rows);
     }
     $countBadge.textContent = `${allRows.length} rows`;
 
-    const combinedStatus = (r)=>{
+    // Combined status helper (we keep this so Explain uses the same logic)
+    const combinedStatus = (r) => {
       const parts = [];
-      if (info.phaseIdx>=0) parts.push(safeCell(r[info.phaseIdx]));
-      if (info.titleIdx>=0) parts.push(safeCell(r[info.titleIdx]));
-      if (info.allNotesIdx>=0) parts.push(safeCell(r[info.allNotesIdx]));
+      if (info.phaseIdx >= 0) parts.push(safeCell(r[info.phaseIdx]));
+      if (info.titleIdx >= 0) parts.push(safeCell(r[info.titleIdx]));
+      if (info.allNotesIdx >= 0) parts.push(safeCell(r[info.allNotesIdx]));
       return parts.filter(Boolean).join(" | ");
     };
 
-    // Group rows by job
-  // Group rows by job
-const jobGroups = new Map();
-const keyIdx = info.keyIdx;
+   // Group rows by job (same as before)
+    const jobGroups = new Map();
+    window.jobGroups = jobGroups;
 
-allRows.forEach((r, i) => {
-  const rawJob = r[keyIdx];                         // whatever is in the job column
-  const prettyJob = String(rawJob || "").trim();    // for display / logs
-  if (!prettyJob) return;
+    const keyIdx = info.keyIdx;
 
-  const jobKey = makeJobKey(rawJob);                // <- HERE is where keyExact logic gets used
-  if (!jobKey) return;
+    allRows.forEach((r, i) => {
+      const rawJob = r[keyIdx];
+      const prettyJob = String(rawJob || "").trim();
+      if (!prettyJob) return;
 
-  const list = jobGroups.get(jobKey) || [];
-  list.push({
-    r,
-    rowNum: i + (info.headerRowIndex + 2),
-    rawJob: prettyJob
-  });
-  jobGroups.set(jobKey, list);
-});
+      const jobKey = makeJobKey(rawJob);
+      if (!jobKey) return;
 
-log(`Grouped into ${jobGroups.size} unique jobs.`, "ok");
+      const list = jobGroups.get(jobKey) || [];
+      list.push({
+        r,
+        rowNum: i + (info.headerRowIndex + 2),
+        rawJob: prettyJob,
+      });
+      jobGroups.set(jobKey, list);
+    });
+
+    log(`Grouped into ${jobGroups.size} unique jobs.`, "ok");
+
+    // === Async classification: handle jobs in chunks so browser doesn't freeze ===
+    const entries = Array.from(jobGroups.entries());
+    const totalJobs = entries.length;
+const assignment = new Map();
+window.assignment = assignment;
+
+const close = [];
+window.close = close; // lets you type `close` in console
+
+let index = 0;
+const BATCH_SIZE = 40;
+const FRAME_BUDGET = 12;
 
 
-    function classifyJob(job, records, info){
-      const d = decideForJob(job, records);
-      return {
-        bucket: d.bucket || null,
-        reason: d.reason || "",
-        trade: d.trade || null,
-        extra: d.extra || null,
-        duplicates: Array.isArray(d.duplicates)
-          ? d.duplicates.map(x => ({
-              bucket: x.bucket || null,
-              reason: x.reason || "",
-              trade: x.trade || null,
-              extra: x.extra || null
-            }))
-          : []
-      };
+    $summary.textContent = `Classifying ${totalJobs} jobs...`;
+    // ---------------- CLASSIFY JOB ----------------
+function classifyJob(job, records, info) {
+  try {
+    // Call the decision helper
+    const result = decideForJob(job, records, info);
+
+    // Safety: ensure the structure is complete
+    if (!result || typeof result !== "object") {
+      return { bucket: null, reason: "Invalid decision result", trade: null, duplicates: [] };
     }
+
+    // Handle duplicates array
+    if (!Array.isArray(result.duplicates)) result.duplicates = [];
+
+    return result;
+  } catch (err) {
+    console.error("classifyJob error for", job, err);
+    return { bucket: null, reason: `Error: ${err.message}`, trade: null, duplicates: [] };
+  }
+}
+
+
+function finishCompute(allRows, info, jobGroups, assignment, combinedStatus) {
+  const columns = [];
+const jobsToClose = [];
+window.jobsToClose = jobsToClose;   // 👈 expose globally for console access
+
+  // ✅ Declare these FIRST so they can be safely used below
+  const invoice = [];
+  const close = [];
+  const lien = [];
+
+  function allBucketsForDecision(decision) {
+    const arr = [];
+    if (decision.bucket) arr.push(decision.bucket);
+    if (Array.isArray(decision.duplicates)) {
+      for (const dup of decision.duplicates) {
+        if (dup && dup.bucket) arr.push(dup.bucket);
+      }
+    }
+    return arr;
+  }
+
+  // 🧩 Per-trade buckets
+  for (const trade of TRADES) {
+    if (IGNORED_TRADES.has(String(trade).toLowerCase())) continue;
+    const items = [];
+
+    for (const [job, decision] of assignment.entries()) {
+      const allB = allBucketsForDecision(decision);
+      if (allB.some(b => String(b || "").includes(`${trade} To Pay`))) {
+        items.push(job);
+      }
+    }
+
+    if (items.length) items.sort(compareJobsByStreet);
+    columns.push({ header: `${trade} To Pay`, items });
+  }
+
+  // 🧾 Global buckets
+  for (const [job, decision] of assignment.entries()) {
+    const allB = allBucketsForDecision(decision);
+    if (allB.some(b => String(b || "").includes("Jobs To Invoice"))) invoice.push(job);
+    if (allB.some(b => String(b || "").includes("Jobs To Close")))   close.push(job);
+    if (allB.some(b => String(b || "").includes("Liens Needed")))    lien.push(job);
+  }
+
+  // ✅ Safe to sort now
+  invoice.sort(compareJobsByStreet);
+  close.sort(compareJobsByStreet);
+  lien.sort(compareJobsByStreet);
+
+  // ✅ Add to columns
+  columns.push({ header: "Jobs To Invoice", items: invoice });
+  columns.push({ header: "Jobs To Close",   items: close });
+  columns.push({ header: "Liens Needed",    items: lien });
+columns.push({ header:"Jobs To Close", items:close });  // ✅ Add this line
+
+  // 🪟 Render everything
+  renderColumns(columns);
+  const aoaOut = buildAOA(columns);
+
+  // 📥 Setup CSV download
+  $download.onclick = () => {
+    const location = document.getElementById("locationSelect")?.value || "Unknown";
+    const date = new Date().toISOString().split("T")[0];
+    const filename = `${location}_Jobs_${date}.csv`;
+    downloadAOA(aoaOut, filename);
+  };
+
+  $download.disabled = false;
+  state = { rows: allRows, info, jobGroups, assignment, combinedStatus };
+
+  const counts = columns.map(c => `${c.header}=${c.items.length}`).join(" • ");
+  log(`Computation complete. ${counts}`, "ok");
+  $summary.textContent = "Done.";
+}
 
     function paidFamilyAny(records, info, tokens, decideDone){
       const rows = records.map(({ r }) => ({ r, s: textOf(r, info) }));
@@ -654,7 +880,23 @@ function tradeIsFinished(trade, recs, meta){
   }
   return soft; // ✅ for trades, this is OK (lets trades show up in To Pay)
 }
-
+function classifyJob(job, records, info){
+      const d = decideForJob(job, records);
+      return {
+        bucket: d.bucket || null,
+        reason: d.reason || "",
+        trade: d.trade || null,
+        extra: d.extra || null,
+        duplicates: Array.isArray(d.duplicates)
+          ? d.duplicates.map(x => ({
+              bucket: x.bucket || null,
+              reason: x.reason || "",
+              trade: x.trade || null,
+              extra: x.extra || null
+            }))
+          : []
+      };
+    }
 
 function paidStatus(trade, recs, meta){
   // Default: "Paid {Trade}"
@@ -701,7 +943,6 @@ function getTradesToPay(recs, meta){
 }
 
 // ----- MAIN DECISION for To Pay (+Close if Invoiced) ------------------------
-// ----- MAIN DECISION for To Pay (+Close if Invoiced) ------------------------
 const tradesNeedingPayment = getTradesToPay(records, info); // pass info, not meta
 
 if (tradesNeedingPayment.length >= 1){
@@ -730,29 +971,11 @@ if (tradesNeedingPayment.length >= 1){
   }
 
 // Invoiced status + final status
-// Invoiced status + final status
 const inv = invoiceStatus(records, info);
 const finalDoneNow = hasFinalDone(records, info); // uses strict Completed=TRUE
 
 // ✅ ALSO show in Close if BOTH invoice & final are fully completed
-if (inv.present && inv.done && finalDoneNow){
-  (result.duplicates ??= []).push({
-    bucket: "Jobs To Close",
-    reason: `Invoice completed and 100% Job Complete marked done; also pending trade payment`,
-    trade:  null,
-    extra:  { multiTradesPending: sorted }
-  });
-}
-
-
-
-  // ✅ NEW: ALSO show in Jobs To Invoice when either:
-  //   - Invoiced is present but not completed, or
-  //   - Ready for invoice (JCI 100%/done), invoice not started and phrase not required
-  const ready = jobReadyForInvoice(records, info);
-  const invoicePhraseRequired = (typeof REQUIRE_INVOICE_PHRASE_FOR_BUCKET !== "undefined") ? REQUIRE_INVOICE_PHRASE_FOR_BUCKET : false;
-
-  if ( (inv.present && !inv.done) || (!inv.present && !invoicePhraseRequired && ready) ){
+ if ( (inv.present && !inv.done) || (!inv.present && !invoicePhraseRequired && ready) ){
     (result.duplicates ??= []).push({
       bucket: "Jobs To Invoice",
       reason: inv.present && !inv.done ? '"Invoiced" present but not completed'
@@ -762,8 +985,37 @@ if (inv.present && inv.done && finalDoneNow){
     });
   }
 
+
+
+  // ✅ NEW: ALSO show in Jobs To Invoice when either:
+  //   - Invoiced is present but not completed, or
+  //   - Ready for invoice (JCI 100%/done), invoice not started and phrase not required
+  const ready = jobReadyForInvoice(records, info);
+  const invoicePhraseRequired = (typeof REQUIRE_INVOICE_PHRASE_FOR_BUCKET !== "undefined") ? REQUIRE_INVOICE_PHRASE_FOR_BUCKET : false;
+
+ 
+
   return result;
 }
+// -----------------------------------------------------------
+// 🚫 Suppress payments/invoicing if job not inspected or incomplete
+// -----------------------------------------------------------
+function jobWorkNotInspected(records, info) {
+  const inspectedRow = records.find(({ r }) => {
+    const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]).toLowerCase() : "";
+    return title.includes("job complete/inspected");
+  });
+  if (!inspectedRow) return true; // no inspection row at all
+
+  const pct = info.percentCompleteIdx >= 0
+    ? Number(inspectedRow.r[info.percentCompleteIdx])
+    : NaN;
+
+  // treat anything < 100 as not inspected
+  return Number.isNaN(pct) || pct < 100;
+}
+
+
 function hasFinalDone(records, info) {
   return hasFinalCompleteDone(records, info);
 }
@@ -853,7 +1105,6 @@ for (const trade of TRADES) {
   // ✅ NEW: require activity for this trade (so we don't invent "Siding To Pay"
   // on jobs that only have columns / porch / etc.)
   if (!hasTradeActivity(trade, records, info)) {
-    vlog(`[Skip Trade] ${job}: no activity for ${trade}`);
     continue;
   }
 
@@ -872,22 +1123,30 @@ for (const trade of TRADES) {
     continue;
   }
 
-  const paidTruth = tradePaidTruthiness(trade, records, info);
+   const paidTruth = tradePaidTruthiness(trade, records, info);
   if (paidTruth === true) {
     // already paid → do not show in any To Pay bucket
     vlog(`[Skip Trade] ${job}: ${trade} already paid (Paid column / flag)`);
     continue;
   }
 
+  // 🚫 If work has not been inspected (Job Complete/Inspected < 100),
+  // do NOT put this trade into any "To Pay" bucket.
+  const workNotInspected = jobWorkNotInspected(records, info);
+
   if (paidTruth === false) {
     // explicit “Paid {Trade} = FALSE”
     if (tradeKey === "porch" && typeof HIDE_PORCH_TO_PAY !== "undefined" && HIDE_PORCH_TO_PAY) {
       // suppressed by flag
       vlog(`[Skip Trade] ${job}: ${trade} to pay suppressed by HIDE_PORCH_TO_PAY`);
+    } else if (workNotInspected) {
+      // suppressed because inspection is not complete
+      vlog(`[Skip Trade] ${job}: ${trade} to pay suppressed because work not inspected`);
+      continue;
     } else {
       primaryTradeHit = {
         bucket: `${trade} To Pay`,
-        reason: `Paid ${trade} = FALSE (finished)`,
+        reason: `Paid ${trade} = FALSE (finished & inspected)`,
         trade,
         extra: null
       };
@@ -899,10 +1158,14 @@ for (const trade of TRADES) {
     if (titleIndicatesTradeToPay(trade, records, info, tokens)) {
       if (tradeKey === "porch" && typeof HIDE_PORCH_TO_PAY !== "undefined" && HIDE_PORCH_TO_PAY) {
         vlog(`[Skip Trade] ${job}: ${trade} To Pay suppressed by HIDE_PORCH_TO_PAY (title-based)`);
+      } else if (workNotInspected) {
+        // suppressed because inspection is not complete
+        vlog(`[Skip Trade] ${job}: ${trade} To Pay suppressed because work not inspected (title-based)`);
+        continue;
       } else {
         primaryTradeHit = {
           bucket: `${trade} To Pay`,
-          reason: `${trade} payment needed (title/implicit, finished)`,
+          reason: `${trade} payment needed (title/implicit, finished & inspected)`,
           trade,
           extra: null
         };
@@ -911,6 +1174,7 @@ for (const trade of TRADES) {
     }
   }
 }
+
 
 
 
@@ -964,116 +1228,116 @@ for (const trade of TRADES) {
         return { bucket:null, reason:"Final present but not done → suppress (job not done)", trade:null, extra:null };
       }
 
-      if (primaryTradeHit && ALLOW_MULTI_BUCKETS){
+// ✅ Prioritize fully closed jobs over trade payments
+// ✅ Prioritize fully closed jobs over trade payments
+const invoiceOk = invoicedPresent && invoicedDone;
+const finalStrict = records.some(({ r }) => {
+  const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]).toLowerCase() : "";
+  const pct   = info.percentCompleteIdx >= 0 ? numberish(r[info.percentCompleteIdx]) : NaN;
+  return title.includes("100% job complete") && !Number.isNaN(pct) && pct >= 100;
+});
+
+// ✅ allow Jobs To Close when final is 100% and an Invoiced row is present (any percent)
+if ((invoiceOk || invoicedPresent) && finalStrict) {
+  return {
+    bucket: "Jobs To Close",
+    reason: "100% Job Complete row found and invoice present → ready to close",
+    trade: null,
+    extra: null,
+  };
+}
+
+
+// 🧩 If not fully closed yet, *then* consider multi-bucket trades/invoice
+if (primaryTradeHit && ALLOW_MULTI_BUCKETS) {
   const hasInvoicePhrase = containsInvoiceSignal(records, info);
-  if (invoiceNeeded || hasInvoicePhrase){
+  if (invoiceNeeded || hasInvoicePhrase) {
     return {
       ...primaryTradeHit,
-      duplicates:[{
-        bucket:"Jobs To Invoice",
-        reason: invoiceReason || 'Invoice present but not yet completed',
+      duplicates: [{
+        bucket: "Jobs To Invoice",
+        reason: invoiceReason || "Invoice present but not yet completed",
         trade: null,
         extra: null
       }]
     };
   }
 }
-      if (primaryTradeHit) return primaryTradeHit;
-      if (invoiceNeeded)  return { bucket:"Jobs To Invoice", reason:invoiceReason, trade:null, extra:null };
 
-  
-// ✅ Close ONLY if: invoice done AND final row done
-const invoiceDone = hasInvoicedDone(records, info);
-const finalDoneHard = hasFinalDone(records, info);
+// If still not closed, fall back to single-bucket trade or invoice
+if (primaryTradeHit) return primaryTradeHit;
+if (invoiceNeeded)  return { bucket: "Jobs To Invoice", reason: invoiceReason, trade: null, extra: null };
 
-if (invoiceDone && finalDoneHard) {
-  return {
-    bucket: "Jobs To Close",
-    reason: "Invoice completed and final complete; job can be closed even if some trades still need payment",
-  };
+if (records.some(({ r }) => anyContains(combinedStatus(r), PHRASES_LIEN))) {
+  return { bucket: "Liens Needed", reason: "lien phrase found", trade: null, extra: null };
+}
+
+return { bucket: null, reason: "no rules matched", trade: null, extra: null };
+    }
+
+ 
+function classifyBatch() {
+  const start = performance.now();
+  let processed = 0;
+
+  while (
+    index < totalJobs &&
+    processed < BATCH_SIZE &&
+    performance.now() - start < FRAME_BUDGET
+  ) {
+    const [jobKey, records] = entries[index++];
+    const displayJobName = records[0]?.rawJob || "";
+    const pick = classifyJob(displayJobName, records, info);
+    assignment.set(jobKey, pick);
+    if (pick.bucket === "Jobs To Close") close.push(displayJobName);
+
+    processed++;
+  }
+
+  $summary.textContent = `Classifying jobs... ${index}/${totalJobs}`;
+
+  if (index < totalJobs) {
+    requestAnimationFrame(classifyBatch);
+  } else {
+    // ✅ This calls your new finishCompute that already builds columns + invoice/close/lien
+    finishCompute(allRows, info, jobGroups, assignment, combinedStatus);
+  }
+}
+
+// Start classification
+requestAnimationFrame(classifyBatch);
+
+
+  } catch (e) {
+    log(e?.message || String(e), "err");
+  }
+}); // closes $run.addEventListener
+
+// ---------------- CLASSIFY JOB ----------------
+function classifyJob(job, records, info) {
+  try {
+    // Call the decision helper
+    const result = decideForJob(job, records, info);
+
+    // Ensure consistent structure
+    if (!result || typeof result !== "object") {
+      return { bucket: null, reason: "Invalid decision result", trade: null, duplicates: [] };
+    }
+
+    // Guarantee duplicates array
+    if (!Array.isArray(result.duplicates)) result.duplicates = [];
+
+    return result;
+  } catch (err) {
+    console.error("classifyJob error for", job, err);
+    return { bucket: null, reason: `Error: ${err.message}`, trade: null, duplicates: [] };
+  }
 }
 
 
-
-
-      if (records.some(({r}) => anyContains(combinedStatus(r), PHRASES_LIEN))){
-        return { bucket:"Liens Needed", reason:"lien phrase found", trade:null, extra:null };
-      }
-      return { bucket:null, reason:"no rules matched", trade:null, extra:null };
-    }
-
-    // assign jobs
-  const assignment = new Map();
-for (const [jobKey, records] of jobGroups.entries()){
-  const displayJobName = records[0]?.rawJob || "";   // "2 Sugar Creek"
-  const pick = classifyJob(displayJobName, records, info);
-  assignment.set(jobKey, pick);
-}
-
-
-    const columns = [];
-
-    // Helper to get ALL bucket labels for a job (primary + duplicates)
-    function allBucketsForDecision(decision){
-      const arr = [];
-      if (decision.bucket) arr.push(decision.bucket);
-      if (Array.isArray(decision.duplicates)){
-        for (const dup of decision.duplicates){
-          if (dup && dup.bucket) arr.push(dup.bucket);
-        }
-      }
-      return arr;
-    }
-
-    // === FIX: Build each trade column ONCE (includes duplicates), removing the earlier duplicate pass ===
-    for (const trade of TRADES){
-      if (IGNORED_TRADES.has(String(trade).toLowerCase())) continue;
-      const items = [];
-      for (const [job, decision] of assignment.entries()){
-        const allB = allBucketsForDecision(decision);
-        if (allB.some(b => String(b||"").includes(`${trade} To Pay`))){
-          items.push(job);
-        }
-      }
-      if (items.length) items.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
-      columns.push({ header:`${trade} To Pay`, items });
-    }
-
-// Global buckets — include duplicates as well
-// Global buckets — include duplicates for Close
-const invoice = [], close = [], lien = [];
-for (const [job, decision] of assignment.entries()){
-  const allB = allBucketsForDecision(decision);
-  if (allB.some(b => String(b||"").includes("Jobs To Invoice"))) invoice.push(job);
-  if (allB.some(b => String(b||"").includes("Jobs To Close")))   close.push(job);   // ← include duplicates
-  if (allB.some(b => String(b||"").includes("Liens Needed")))    lien.push(job);
-}
-
-
-invoice.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
-close.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
-lien.sort((a,b)=>a.localeCompare(b, undefined, {numeric:true,sensitivity:'base'}));
-columns.push({ header:"Jobs To Invoice", items: invoice });
-columns.push({ header:"Jobs To Close",   items: close });
-columns.push({ header:"Liens Needed",    items: lien });
-
-
-    renderColumns(columns);
-
-    const aoaOut = buildAOA(columns);
-    $download.onclick = () => downloadAOA(aoaOut);
-    $download.disabled = false;
-
-    state = { rows: allRows, info, jobGroups, assignment, combinedStatus };
-
-    const counts = columns.map(c=>`${c.header}=${c.items.length}`).join(" • ");
-    log(`Computation complete. ${counts}`, "ok");
-  }catch(e){ log(e?.message||String(e), "err"); }
-});
 
 /* ----------------- Explain panel ----------- */
-/* ----------------- Explain panel ----------- */
-$inspectBtn.addEventListener('click', ()=>{
+$inspectBtn.addEventListener('click', () => {
   if (!state) {
     $inspectOut.textContent = "Run Compute first.";
     return;
@@ -1091,12 +1355,46 @@ $inspectBtn.addEventListener('click', ()=>{
 
   const { jobGroups, assignment, info } = state;
   const lines = [];
-  lines.push("Explain (priority = Trades → Invoice → Close → Lien)");
-  lines.push("");
-  lines.push("Legend: ✅ done • 🟡 present, not done • ⛔ unpaid • 📄 invoiced row");
-  lines.push("");
 
-  // 🔍 Loop through each job typed into the explain box
+lines.push("Explain (priority = Trades → Invoice → Close → Lien)");
+lines.push("");
+lines.push("Legend:");
+lines.push("  ✅ % = 100 (done)");
+lines.push("  🟡 0 < % < 100 (in progress)");
+lines.push("  ❌ % = 0 or blank (not started)");
+lines.push("  ⛔ unpaid (trade needing payment)");
+lines.push("  📄 invoiced row");
+lines.push("");
+
+
+  // Helper to show a short version of each record, including raw/computed flags
+function rowMini(r) {
+  const rawTitle = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
+  const phase    = info.phaseIdx >= 0 ? safeCell(r[info.phaseIdx]) : "";
+  const pctVal   = info.percentCompleteIdx >= 0 ? numberish(r[info.percentCompleteIdx]) : NaN;
+  const pctStr   = Number.isNaN(pctVal) ? "-" : pctVal;
+  const rawComp  = info.completedIdx >= 0 ? safeCell(r[info.completedIdx]) : "";
+
+  // Icons purely from PercentComplete:
+  // ✅ = 100 (done)
+  // 🟡 = between 0 and 100 (in progress)
+  // ❌ = 0 or blank (not started)
+  let icon = "❌";
+  if (!Number.isNaN(pctVal)) {
+    if (pctVal >= 100) {
+      icon = "✅";
+    } else if (pctVal > 0) {
+      icon = "🟡";
+    }
+  }
+
+  const shownPhase = phase || "(no phase)";
+  const shownComp  = rawComp === "" ? "blank" : rawComp;
+
+  return `${icon} "${rawTitle}" — ${shownPhase} — %=${pctStr} — CompletedCell=${shownComp}`;
+}
+
+
   for (const rawJob of targets) {
     const displayName = rawJob.trim();
     const jobKey = makeJobKey(displayName);   // normalize casing/spaces
@@ -1109,38 +1407,78 @@ $inspectBtn.addEventListener('click', ()=>{
       continue;
     }
 
-    const pick = assignment.get(jobKey) || { bucket: null, reason: "(none)" };
+    const pick = assignment.get(jobKey) || { bucket: null, reason: "(none)", duplicates: [] };
     const displaySafe = recs[0]?.rawJob || displayName;
 
-    // Header for this job
-    lines.push(`• ${displaySafe}`);
-    lines.push(`  Bucket(s): ${pick.bucket || "(none)"}  |  Reason: ${pick.reason || "(none)"}`);
+    // Collect all buckets including duplicates
+    const allB = allBucketsForDecision(pick);
+    const bucketLabel = allB.length ? allB.join(", ") : "(none)";
 
-    // 🧩 Helper to print a short version of each record
-    function rowMini(r) {
-      const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
-      const phase = info.phaseIdx >= 0 ? safeCell(r[info.phaseIdx]) : "";
-      const pct   = info.percentCompleteIdx >= 0 ? safeCell(r[info.percentCompleteIdx]) : "";
-      const done  = info.completedIdx >= 0 ? safeCell(r[info.completedIdx]) : "";
-      return `"${title}" — ${phase} — %=${pct || 0} — Completed=${done || ""}`;
+    lines.push(`• ${displaySafe}`);
+    lines.push(`  Bucket(s): ${bucketLabel}  |  Reason: ${pick.reason || "(none)"}`);
+
+    // Show duplicate bucket reasons, if any
+    if (Array.isArray(pick.duplicates) && pick.duplicates.length) {
+      lines.push("  Additional buckets:");
+      for (const dup of pick.duplicates) {
+        const dupBucket = dup && dup.bucket ? dup.bucket : "(none)";
+        const dupReason = dup && dup.reason ? dup.reason : "(none)";
+        lines.push(`    • ${dupBucket} — ${dupReason}`);
+      }
     }
 
-    // 🔧 Show debug aliases (optional)
+    // ---- Status snapshot (what the classifier sees) ----
+    const invStatus = invoiceStatus(recs, info);
+    const finalDone      = hasFinalCompleteDone(recs, info);
+    const finalPending   = hasFinalCompletePresentButNotDone(recs, info);
+    const tradesToPay    = getTradesToPay(recs, info);
+    let anyLien = false;
+    try {
+      anyLien = recs.some(({ r }) => anyContains(combinedStatus(r), PHRASES_LIEN));
+    } catch (e) {
+      anyLien = false;
+    }
+
+    const invoicePresentIcon = invStatus.present ? "✅" : "❌";
+    const invoiceDoneIcon    = invStatus.done    ? "✅" : "🟡";
+
+    let finalLine = "";
+    if (finalDone) {
+      finalLine = "✅ final done";
+    } else if (finalPending) {
+      finalLine = "🟡 final present but not done";
+    } else {
+      finalLine = "❌ no final row";
+    }
+
+    const tradesLine = tradesToPay.length
+      ? `⛔ trades needing payment: ${tradesToPay.join(", ")}`
+      : "no trades needing payment";
+
+    const lienLine = anyLien ? "Lien phrase detected (PHRASES_LIEN match)" : "no lien phrase detected";
+
+    lines.push("  Status snapshot:");
+    lines.push(`    • Invoice: present ${invoicePresentIcon} | done ${invoiceDoneIcon}`);
+    lines.push(`    • Final (100% / inspected): ${finalLine}`);
+    lines.push(`    • Trades: ${tradesLine}`);
+    lines.push(`    • Liens: ${lienLine}`);
+
+    // Debug aliases
     lines.push("  Debug Aliases:");
     for (const [alias, terms] of Object.entries(ALIAS_GROUPS)) {
       lines.push(`    ${alias} → ${terms.join(", ")}`);
     }
 
-    // 🔍 Show invoiced row count (if any)
+    // Invoiced row count
     const invoicedRows = recs.filter(({ r }) => {
       const val = info.titleIdx >= 0 ? String(r[info.titleIdx]).toLowerCase() : "";
       return val.includes("invoiced");
     });
     if (invoicedRows.length) {
-      lines.push(`  🟡 📄 Invoiced row present (${invoicedRows.length})`);
+      lines.push(`  📄 Invoiced rows: ${invoicedRows.length}`);
     }
 
-    // 🔍 Show key rows
+    // Key rows
     lines.push("  Key rows:");
     for (const { r } of recs) {
       lines.push("  - " + rowMini(r));
@@ -1149,9 +1487,20 @@ $inspectBtn.addEventListener('click', ()=>{
     lines.push(""); // blank line between jobs
   }
 
-  // Output to the text area
   $inspectOut.textContent = lines.join("\n");
 });
+// 🔧 Make allBucketsForDecision globally available for Explain panel
+function allBucketsForDecision(decision) {
+  if (!decision) return [];
+  const arr = [];
+  if (decision.bucket) arr.push(decision.bucket);
+  if (Array.isArray(decision.duplicates)) {
+    for (const dup of decision.duplicates) {
+      if (dup && dup.bucket) arr.push(dup.bucket);
+    }
+  }
+  return arr;
+}
 
 // --- FINAL ROW DETECTORS --- */
 // --- FINAL ROW DETECTORS --- */
@@ -1162,50 +1511,56 @@ function isFinalCompleteRow(title) {
          /\bfinal\b/.test(t);
 }
 
-// ✅ FINAL = only when Completed is TRUE (checkbox / TRUE / 1 / etc.)
+// ✅ FINAL DONE = any final-style row with PercentComplete = 100
 function hasFinalCompleteDone(records, info) {
   if (!Array.isArray(records)) return false;
 
   return records.some(({ r }) => {
     const rawTitle = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
-    const title    = rawTitle.toLowerCase();
-    const done     = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
-    const pct      = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+    if (!isFinalCompleteRow(rawTitle)) return false;
 
-    if (title.includes("100% job complete")) {
-      return !Number.isNaN(pct) && pct >= 100;
-    }
-    if (title.includes("job complete/inspected") || title.includes("final")) {
-      return done === true;
-    }
-    return false;
+    const pctVal = info.percentCompleteIdx >= 0
+      ? numberish(r[info.percentCompleteIdx])
+      : NaN;
+
+    // Treat 100% as TRUE / done
+    return !Number.isNaN(pctVal) && pctVal >= 100;
   });
 }
 
-// ✅ FINAL present but not done = final row exists and Completed is NOT TRUE
+// ✅ FINAL PRESENT BUT NOT DONE = we see a final row, but NONE are at 100%
 function hasFinalCompletePresentButNotDone(records, info) {
   if (!Array.isArray(records)) return false;
 
-  return records.some(({ r }) => {
-    const rawTitle = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
-    const title    = rawTitle.toLowerCase();
-    const done     = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
-    const pct      = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+  let anyFinal = false;
+  let anyDone  = false;
 
-    if (title.includes("100% job complete")) {
-      return !( !Number.isNaN(pct) && pct >= 100 );
+  for (const { r } of records) {
+    const rawTitle = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
+    if (!isFinalCompleteRow(rawTitle)) continue;
+
+    anyFinal = true;
+
+    const pctVal = info.percentCompleteIdx >= 0
+      ? numberish(r[info.percentCompleteIdx])
+      : NaN;
+
+    if (!Number.isNaN(pctVal) && pctVal >= 100) {
+      anyDone = true;
     }
-    if (title.includes("job complete/inspected") || title.includes("final")) {
-      return !done;
-    }
-    return false;
-  });
+  }
+
+  // “pending final” only if we saw a final row, but none reached 100%
+  return anyFinal && !anyDone;
 }
 
-// Optional tiny alias so your other code can call hasFinalDone(...)
+// Tiny alias so the rest of the code can keep calling hasFinalDone(.)
 function hasFinalDone(records, info) {
   return hasFinalCompleteDone(records, info);
 }
+
+
+
 
 
 
@@ -1415,15 +1770,14 @@ const ALIAS_GROUPS = {
   "Job Complete": ["100% job complete", "job complete/inspected"]
 };
 
-function downloadAOA(aoa){
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  const colCount = aoa[0]?.length || 0;
-  ws['!cols'] = Array.from({length: colCount}, ()=>({ wch: 26 }));
+function downloadAOA(aoa, filename = "jobs.csv") {
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Who To Pay");
-  XLSX.writeFile(wb, `Who To Pay ${dateStamp()}.xlsx`);
-  log("Excel downloaded.", "ok");
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  XLSX.utils.book_append_sheet(wb, ws, "Jobs");
+
+  XLSX.writeFile(wb, filename);
 }
+
 
 function readRow(r, info){
   const rawTitle = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
@@ -1475,6 +1829,7 @@ const TITLE_ALIASES = {
     paid: [
       "paid column", "paid columns"
     ]
+    
   },
 
   // Add other trades here as needed:
