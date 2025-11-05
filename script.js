@@ -360,6 +360,41 @@ function decideForJob(job, records) {
       .join(" | ")
       .toLowerCase()
   );
+// ----------------- INVOICE vs CLOSE -----------------
+
+const finalDone = hasFinalDone(records, info);
+const invoicePresentFlag = invoicePresent(records, info);
+const invoiceDone = hasInvoicedDone(records, info);
+// ---------- Invoice Status Text ----------
+const invoiceStatusText = (() => {
+  if (!invoicePresentFlag) return "Invoice: not present ❌";
+  if (invoiceDone) return "Invoice: present ✅";
+  return "Invoice: present ❌ (0% or partial)";
+})();
+
+// 1) Final done AND invoice 100% → Jobs To Close
+if (finalDone && invoiceDone) {
+  return {
+    bucket: "Jobs To Close",
+    reason: "Final completion row done and invoice completed; all trades paid"
+  };
+}
+
+// 2) Final done AND invoice present but NOT done (0% or partial) → Jobs To Invoice
+if (finalDone && invoicePresentFlag && !invoiceDone) {
+  return {
+    bucket: "Jobs To Invoice",
+    reason: "Final completion done but invoice is still 0% or partial"
+  };
+}
+
+// 3) Final done AND no invoice row at all → Jobs To Invoice
+if (finalDone && !invoicePresentFlag) {
+  return {
+    bucket: "Jobs To Invoice",
+    reason: "Final completion done but invoice row is missing"
+  };
+}
 
   // --- Lien detection ---
   if (txts.some(s => s.includes("lien"))) {
@@ -1015,23 +1050,27 @@ function jobWorkNotInspected(records, info) {
   return Number.isNaN(pct) || pct < 100;
 }
 
+function invoicePresent(records, info) {
+  if (info.titleIdx < 0) return false;
 
+  return records.some(({ r }) => {
+    const title = String(r[info.titleIdx] || "").toLowerCase();
+    return title.includes("invoiced"); // matches "Invoiced"
+  });
+}
 function hasFinalDone(records, info) {
   return hasFinalCompleteDone(records, info);
 }
 
 function hasInvoicedDone(records, info) {
-  if (!Array.isArray(records)) return false;
+  if (info.titleIdx < 0 || info.percentCompleteIdx < 0) return false;
+
   return records.some(({ r }) => {
-    const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
-    // Look for rows that start with or include "Invoiced"
-    if (!/\binvoiced\b/i.test(title)) return false;
+    const title = String(r[info.titleIdx] || "").toLowerCase();
+    if (!title.includes("invoiced")) return false;
 
-    const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
-    const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
-
-    // ✅ Treat either Completed = true or PercentComplete >= 100 as “done”
-    return done === true || (!Number.isNaN(pct) && pct >= 100);
+    const pct = Number(r[info.percentCompleteIdx]) || 0;
+    return pct >= 100;
   });
 }
 
@@ -1229,7 +1268,6 @@ for (const trade of TRADES) {
       }
 
 // ✅ Prioritize fully closed jobs over trade payments
-// ✅ Prioritize fully closed jobs over trade payments
 const invoiceOk = invoicedPresent && invoicedDone;
 const finalStrict = records.some(({ r }) => {
   const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]).toLowerCase() : "";
@@ -1237,15 +1275,17 @@ const finalStrict = records.some(({ r }) => {
   return title.includes("100% job complete") && !Number.isNaN(pct) && pct >= 100;
 });
 
-// ✅ allow Jobs To Close when final is 100% and an Invoiced row is present (any percent)
-if ((invoiceOk || invoicedPresent) && finalStrict) {
+// ✅ only close when invoice is fully done AND final is 100%
+if (invoiceOk && finalStrict) {
   return {
     bucket: "Jobs To Close",
-    reason: "100% Job Complete row found and invoice present → ready to close",
+    reason: "Invoice completed and 100% Job Complete row found → ready to close",
     trade: null,
     extra: null,
   };
 }
+
+
 
 
 // 🧩 If not fully closed yet, *then* consider multi-bucket trades/invoice
@@ -1439,8 +1479,11 @@ function rowMini(r) {
       anyLien = false;
     }
 
-    const invoicePresentIcon = invStatus.present ? "✅" : "❌";
-    const invoiceDoneIcon    = invStatus.done    ? "✅" : "🟡";
+  const invoiceStatusText = (() => {
+  if (!invStatus.present) return "Invoice: ❌";
+  if (invStatus.done) return "Invoice: ✅";
+  return "Invoice: ❌"; // present but not 100% still red ❌
+})();
 
     let finalLine = "";
     if (finalDone) {
@@ -1457,8 +1500,8 @@ function rowMini(r) {
 
     const lienLine = anyLien ? "Lien phrase detected (PHRASES_LIEN match)" : "no lien phrase detected";
 
-    lines.push("  Status snapshot:");
-    lines.push(`    • Invoice: present ${invoicePresentIcon} | done ${invoiceDoneIcon}`);
+lines.push("  Status snapshot:");
+lines.push(`    • ${invoiceStatusText}`);
     lines.push(`    • Final (100% / inspected): ${finalLine}`);
     lines.push(`    • Trades: ${tradesLine}`);
     lines.push(`    • Liens: ${lienLine}`);
@@ -1556,7 +1599,18 @@ function hasFinalCompletePresentButNotDone(records, info) {
 
 // Tiny alias so the rest of the code can keep calling hasFinalDone(.)
 function hasFinalDone(records, info) {
-  return hasFinalCompleteDone(records, info);
+  if (info.titleIdx < 0 || info.percentCompleteIdx < 0) return false;
+
+  return records.some(({ r }) => {
+    const title = String(r[info.titleIdx] || "").toLowerCase();
+    const pct = Number(r[info.percentCompleteIdx]) || 0;
+
+    const isFinalTitle =
+      title.includes("100% job complete") ||
+      title.includes("job complete/inspected");
+
+    return isFinalTitle && pct >= 100;
+  });
 }
 
 
