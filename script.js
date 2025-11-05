@@ -524,7 +524,25 @@ const finalDone = hasFinalDone(records, info); // ✅ Add this
 
     // If nothing above has classified it, but we see "invoice" text somewhere,
     // treat it as Jobs To Invoice.
+     // ----------------- FALLBACK INVOICE PHRASE DETECTION -----------------
+
+    // If nothing above has classified it, but we see "invoice" text somewhere,
+    // only treat it as Jobs To Invoice if SOMETHING is actually done (100% or Completed=TRUE).
     if (!result.bucket && txts.some(s => s.includes("invoice") || s.includes("invoiced"))) {
+      const anyDone = jobHasAnyDoneRow(records, info);
+
+      if (!anyDone) {
+        // 🔒 Guard: do NOT show in Jobs To Invoice if nothing is 100% / done
+        return {
+          bucket: null,
+          reason: "Invoice phrase present but no rows at 100% or marked complete → not ready to invoice",
+          trade: null,
+          extra: null,
+          duplicates: []
+        };
+      }
+
+      // ✅ At least one row is done → this is a real “Jobs To Invoice” candidate
       return {
         bucket: "Jobs To Invoice",
         reason: "Invoice phrase found",
@@ -533,6 +551,8 @@ const finalDone = hasFinalDone(records, info); // ✅ Add this
         duplicates: []
       };
     }
+
+      
 
     // ----------------- TRADES-ONLY CASE (no close/invoice conditions hit) -----------------
 
@@ -1452,7 +1472,6 @@ function downloadAOA(aoa, filename = "jobs.csv") {
   XLSX.writeFile(wb, filename);
 }
 
-
 function readRow(r, info){
   const rawTitle = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]) : "";
   const title    = rawTitle.toLowerCase();           // keep spaces and %, just lower-case
@@ -1461,8 +1480,24 @@ function readRow(r, info){
   return { title, done, pct };
 }
 
-function rowIsDone(done, pct){ return !!done || pct === 100; }
-function isFalseComplete(title, done){ return (title.includes("complete") || title.includes("completed")) && !done; }
+function rowIsDone(done, pct){
+  return !!done || pct === 100;
+}
+
+// 🔹 NEW: does this job have *any* row that is actually “done”
+// (Completed = TRUE or PercentComplete = 100)?
+function jobHasAnyDoneRow(records, info){
+  if (!Array.isArray(records)) return false;
+  return records.some(({ r }) => {
+    const { done, pct } = readRow(r, info);
+    return rowIsDone(done, pct);
+  });
+}
+
+function isFalseComplete(title, done){
+  return (title.includes("complete") || title.includes("completed")) && !done;
+}
+
 
 function anyDoneByTitle(records, info, aliases) {
   const aliasNorm = (aliases || []).map(a => norm(a));
