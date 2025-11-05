@@ -392,10 +392,13 @@ function decideForJob(job, records, info) {
       extra: null,
       duplicates: []
     };
-const invoicePresentFlag = invoicePresent(records, info);
+
+    // Basic invoice flags
+    const invoicePresentFlag = invoicePresent(records, info);
     const invoiceDone        = hasInvoicedDone(records, info);
     const invoiceOk          = invoicePresentFlag && invoiceDone;
-const finalDone = hasFinalDone(records, info); // ✅ Add this
+
+    // Use global meta if not passed
     info = info || state?.info || window.info || {};
 
     // Flatten text for simple phrase searches (liens, invoice text)
@@ -405,9 +408,10 @@ const finalDone = hasFinalDone(records, info); // ✅ Add this
         .join(" | ")
         .toLowerCase()
     );
-  
-    // require a "100% Job Complete" row with PercentComplete >= 100
-    const finalStrict = records.some(({ r }) => {
+
+    // ----------------- FINAL FLAGS -----------------
+    // finalForClose: ONLY "100% Job Complete" at 100% (this controls Jobs To Close)
+    const finalForClose = records.some(({ r }) => {
       const title = info.titleIdx >= 0
         ? safeCell(r[info.titleIdx]).toLowerCase()
         : "";
@@ -422,7 +426,8 @@ const finalDone = hasFinalDone(records, info); // ✅ Add this
       );
     });
 
-    
+    // finalForInvoice: your broader "final done" (Job Complete/Inspected OR 100% Job Complete, 100% or Completed=TRUE)
+    const finalForInvoice = hasFinalDone(records, info);
 
     // ----------------- TRADES TO PAY (highest priority) -----------------
 
@@ -436,10 +441,10 @@ const finalDone = hasFinalDone(records, info); // ✅ Add this
 
     // ----------------- CLOSE / INVOICE LOGIC -----------------
 
-    // 1) Invoice done AND 100% Job Complete done
+    // 1) Invoice done AND finalForClose
     //    - If there is a trade to pay → keep trade as primary, add Jobs To Close as duplicate
     //    - If no trade to pay        → Jobs To Close only
-    if (invoiceOk && finalStrict) {
+    if (invoiceOk && finalForClose) {
       if (result.bucket) {
         // Trade bucket exists (To Pay) → add Jobs To Close as duplicate
         result.duplicates.push({
@@ -457,22 +462,27 @@ const finalDone = hasFinalDone(records, info); // ✅ Add this
       return result;
     }
 
-    // 2) Invoice done BUT 100% Job Complete is NOT done
+    // 2) Invoice done BUT 100% Job Complete is NOT 100
     //    - Do NOT put it in Jobs To Close
-    //    - If no trade bucket, suppress from UI
-    if (invoiceOk && !finalStrict && !result.bucket) {
+    //    - If no trade bucket, suppress from UI (no bucket)
+    //
+    // This is the rule that will catch 61 Allston Park:
+    //   - Invoice 100% (invoiceOk = true)
+    //   - Job Complete/Inspected 100% BUT 100% Job Complete = 0% (finalForClose = false)
+    //   - No trade bucket → it will return with bucket=null
+    if (invoiceOk && !finalForClose && !result.bucket) {
       return {
         bucket: null,
-        reason: "Invoice completed but job not 100% complete → hold from closing",
+        reason: "Invoice completed but 100% Job Complete is not 100% → hold from closing",
         trade: null,
         extra: null,
         duplicates: []
       };
     }
 
-    // 3) Final done (100% Job Complete) AND invoice present but NOT done (0% or partial)
+    // 3) Final done (for invoice) AND invoice present but NOT done (0% or partial)
     //    ⇒ Jobs To Invoice (either as primary or duplicate)
-    if (finalStrict && invoicePresentFlag && !invoiceDone) {
+    if (finalForInvoice && invoicePresentFlag && !invoiceDone) {
       const invoiceBucket = {
         bucket: "Jobs To Invoice",
         reason: "Final completion done but invoice is still 0% or partial",
@@ -489,9 +499,9 @@ const finalDone = hasFinalDone(records, info); // ✅ Add this
       return invoiceBucket;
     }
 
-    // 4) Final done AND no invoice row at all
+    // 4) Final done (for invoice) AND no invoice row at all
     //    ⇒ Jobs To Invoice
-    if (finalStrict && !invoicePresentFlag) {
+    if (finalForInvoice && !invoicePresentFlag) {
       const invoiceBucket = {
         bucket: "Jobs To Invoice",
         reason: "Final completion done but invoice row is missing",
@@ -521,11 +531,6 @@ const finalDone = hasFinalDone(records, info); // ✅ Add this
     }
 
     // ----------------- FALLBACK INVOICE PHRASE DETECTION -----------------
-
-    // If nothing above has classified it, but we see "invoice" text somewhere,
-    // treat it as Jobs To Invoice.
-     // ----------------- FALLBACK INVOICE PHRASE DETECTION -----------------
-
     // If nothing above has classified it, but we see "invoice" text somewhere,
     // only treat it as Jobs To Invoice if SOMETHING is actually done (100% or Completed=TRUE).
     if (!result.bucket && txts.some(s => s.includes("invoice") || s.includes("invoiced"))) {
@@ -551,8 +556,6 @@ const finalDone = hasFinalDone(records, info); // ✅ Add this
         duplicates: []
       };
     }
-
-      
 
     // ----------------- TRADES-ONLY CASE (no close/invoice conditions hit) -----------------
 
@@ -580,6 +583,8 @@ const finalDone = hasFinalDone(records, info); // ✅ Add this
     };
   }
 }
+
+
 
 function reEscape(s){ return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
