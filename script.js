@@ -455,12 +455,41 @@ function decideForJob(job, records, info) {
         });
         return result;
       }
+// ----------------- GLOBAL LIEN CHECK (runs last regardless of status) -----------------
+  // ----------------- any other classification logic above -----------------
 
-      // No trades to pay, fully closed
-      result.bucket = "Jobs To Close";
-      result.reason = "Invoice and 100% Job Complete are 100% → ready to close";
-      return result;
+
+  // ----------------- GLOBAL LIEN CHECK (runs last regardless of bucket) -----------------
+  try {
+    const hasLienPhrase = txts.some(s => /lien\b/i.test(s));
+    if (hasLienPhrase) {
+      const lienBucket = {
+        bucket: "Liens Needed",
+        reason: "Lien phrase found",
+        trade: null,
+        extra: null,
+        duplicates: []
+      };
+
+      // If there's already a main bucket, add lien as duplicate
+      if (result.bucket && result.bucket !== "Liens Needed") {
+        result.duplicates = result.duplicates || [];
+        result.duplicates.push(lienBucket);
+      }
+      // If there's no main bucket (like Brunswick case), make lien primary
+      else if (!result.bucket) {
+        result.bucket = "Liens Needed";
+        result.reason = "Lien phrase found (invoice complete but 100% job incomplete)";
+      }
     }
+  } catch (e) {
+    console.warn("Lien check failed:", e);
+  }
+
+  // ----------------- RETURN FINAL RESULT -----------------
+  return result;
+}
+
 
     // 2) Invoice done BUT 100% Job Complete is NOT 100
     //    - Do NOT put it in Jobs To Close
@@ -470,68 +499,88 @@ function decideForJob(job, records, info) {
     //   - Invoice 100% (invoiceOk = true)
     //   - Job Complete/Inspected 100% BUT 100% Job Complete = 0% (finalForClose = false)
     //   - No trade bucket → it will return with bucket=null
-    if (invoiceOk && !finalForClose && !result.bucket) {
-      return {
-        bucket: null,
-        reason: "Invoice completed but 100% Job Complete is not 100% → hold from closing",
-        trade: null,
-        extra: null,
-        duplicates: []
-      };
-    }
+ if (invoiceOk && !finalForClose && !result.bucket) {
+  // run lien detection before returning
+  const hasLienPhrase = txts.some(s => /lien\b/i.test(s));
+  if (hasLienPhrase) {
+    return {
+      bucket: "Liens Needed",
+      reason: "Lien phrase found (invoice complete but 100% job incomplete)",
+      trade: null,
+      extra: null,
+      duplicates: []
+    };
+  }
+
+  // no lien phrase → regular hold
+  return {
+    bucket: null,
+    reason: "Invoice completed but 100% Job Complete is not 100% → hold from closing",
+    trade: null,
+    extra: null,
+    duplicates: []
+  };
+}
+
 
     // 3) Final done (for invoice) AND invoice present but NOT done (0% or partial)
     //    ⇒ Jobs To Invoice (either as primary or duplicate)
-    if (finalForInvoice && invoicePresentFlag && !invoiceDone) {
-      const invoiceBucket = {
-        bucket: "Jobs To Invoice",
-        reason: "Final completion done but invoice is still 0% or partial",
-        trade: null,
-        extra: null,
-        duplicates: []
-      };
+    // 3) Final done (for invoice) AND invoice present but NOT done (0% or partial)
+if (finalForInvoice && invoicePresentFlag && !invoiceDone) {
+  const invoiceBucket = {
+    bucket: "Jobs To Invoice",
+    reason: "Final completion done but invoice is still 0% or partial",
+    trade: null,
+    extra: null,
+    duplicates: []
+  };
 
-      if (result.bucket) {
-        result.duplicates.push(invoiceBucket);
-        return result;
-      }
+  if (result.bucket) {
+    result.duplicates.push(invoiceBucket);
+  } else {
+    result.bucket = "Jobs To Invoice";
+    result.reason = "Final completion done but invoice is still 0% or partial";
+  }
+}
 
-      return invoiceBucket;
-    }
+// 4) Final done (for invoice) AND no invoice row at all
+if (finalForInvoice && !invoicePresentFlag) {
+  const invoiceBucket = {
+    bucket: "Jobs To Invoice",
+    reason: "Final completion done but invoice row is missing",
+    trade: null,
+    extra: null,
+    duplicates: []
+  };
 
-    // 4) Final done (for invoice) AND no invoice row at all
-    //    ⇒ Jobs To Invoice
-    if (finalForInvoice && !invoicePresentFlag) {
-      const invoiceBucket = {
-        bucket: "Jobs To Invoice",
-        reason: "Final completion done but invoice row is missing",
-        trade: null,
-        extra: null,
-        duplicates: []
-      };
+  if (result.bucket) {
+    result.duplicates.push(invoiceBucket);
+  } else {
+    result.bucket = "Jobs To Invoice";
+    result.reason = "Final completion done but invoice row is missing";
+  }
+}
 
-      if (result.bucket) {
-        result.duplicates.push(invoiceBucket);
-        return result;
-      }
+// ----------------- LIEN (last in priority stack) -----------------
+const hasLienPhrase = txts.some(s => /lien\b/i.test(s));
+if (hasLienPhrase) {
+  const lienBucket = {
+    bucket: "Liens Needed",
+    reason: "Lien phrase found",
+    trade: null,
+    extra: null,
+    duplicates: []
+  };
 
-      return invoiceBucket;
-    }
+  if (result.bucket) {
+    result.duplicates.push(lienBucket);
+  } else {
+    result.bucket = "Liens Needed";
+    result.reason = "Lien phrase found";
+  }
+}
 
-    // ----------------- LIEN (last in priority stack) -----------------
-
-    if (!result.bucket && txts.some(s => s.includes("lien"))) {
-      return {
-        bucket: "Liens Needed",
-        reason: "Lien phrase found",
-        trade: null,
-        extra: null,
-        duplicates: []
-      };
-    }
-
-    // ----------------- FALLBACK INVOICE PHRASE DETECTION -----------------
-    // If nothing above has classified it, but we see "invoice" text somewhere,
+    // If nothin above has classified it, but we see "invoice" text somewhere,
     // only treat it as Jobs To Invoice if SOMETHING is actually done (100% or Completed=TRUE).
     if (!result.bucket && txts.some(s => s.includes("invoice") || s.includes("invoiced"))) {
       const anyDone = jobHasAnyDoneRow(records, info);
