@@ -455,6 +455,27 @@ function decideForJob(job, records, info) {
         });
         return result;
       }
+
+      // ✅ NEW RULE: invoice complete + final complete → Close even if trade columns/porch not done
+if (!result.bucket && invoiceOk && finalForClose) {
+  // Detect trades marked 0 % but likely not needed
+  const unusedTrade = records.some(({ r }) => {
+    const t = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]).toLowerCase() : "";
+    const pct = info.percentCompleteIdx >= 0 ? numberish(r[info.percentCompleteIdx]) : NaN;
+    return (
+      (t.includes("column") || t.includes("columns") ||
+       t.includes("porch")  || t.includes("screen porch")) &&
+      (Number.isNaN(pct) || pct === 0)
+    );
+  });
+
+  if (unusedTrade) {
+    result.bucket = "Jobs To Close";
+    result.reason =
+      "Invoice complete and job 100 % finished — trade work not needed (Columns/Porch skipped)";
+  }
+}
+
 // ----------------- GLOBAL LIEN CHECK (runs last regardless of status) -----------------
   // ----------------- any other classification logic above -----------------
 
