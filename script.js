@@ -114,18 +114,20 @@ let state = null;
 /* ----------------- config ----------------- */
 const TRADES = [
   "Painters","Siding","Columns","Trellis","Porch","Screen Porch",
-  "Decking","Waterproof","Louvered Wall","Gutters"
+  "Decking","Waterproof","Louvered Wall","Gutters","Rails" // 👈 add here
 ];
+
 // ---- Trade detection helpers ----
 const TRADE_GROUPS = {
   siding:       ["siding"],
   decking:      ["decking", "deck ", "waterproof deck", "composite deck", "trex"],
-  rails:        ["rail", "rails"],
+  rails:        ["rail", "rails"],           // 👈 add this
   paint:        ["paint", "painter", "painting"],
   housewrap:    ["house wrap","housewrap"],
   "screen porch": ["screen porch", "screened porch"],
-  columns:      ["column", "columns"]           // 👈 NEW: singular + plural
+  columns:      ["column", "columns"]
 };
+
 
 // Map pretty UI labels in TRADES → keys in TRADE_GROUPS (or fallbacks)
 const TRADE_TOKEN_MAP = {
@@ -137,8 +139,10 @@ const TRADE_TOKEN_MAP = {
   "Screen Porch": "screen porch",
   "Waterproof": "waterproof",
   "Louvered Wall": "louvered wall",
-  "Gutters": "gutters"
+  "Gutters": "gutters",
+  "Rails": "rails" // 👈 add this
 };
+
 // 🧩 Normalize job names consistently (spaces, casing)
 function normalizeJobName(name) {
   return String(name || "")
@@ -220,17 +224,63 @@ function findUnpaidTrade(records, info){
     const anyPaidDone    = paidRows.some(x =>  rowIsCompleted(x.r, info));
     const requireTradeComplete = STRICT_COMPLETION_TRADES.has(tradeKey);
 
-    if (
-      anyPaidPending &&
-      !anyPaidDone &&
-      (requireTradeComplete ? tradeComplete : (tradeComplete || closeOutDone || closeOutSoft))
-    ) {
-      return {
-        trade: tradeKey,
-        bucket: `${prettyLabel} To Pay`,
-        reason: `Title→${prettyLabel} (to pay), Paid-title present (unfinished)`
-      };
-    }
+    // Special case: allow Siding To Pay if job is globally complete but not paid
+if (tradeKey === "siding") {
+  const jobName = records[0]?.r?.[info.keyIdx] || "(unknown job)";
+
+  // detect a final-done row manually
+  const hasFinalRow = rows.some(
+    x =>
+      /job\s*complete|inspected/i.test(x.s) &&
+      Number(x.p) >= 100
+  );
+
+  if (/calabash/i.test(jobName)) {
+    console.log("🧩 [Debug-Siding] Job:", jobName, {
+      anyPaidPending,
+      anyPaidDone,
+      closeOutDone,
+      closeOutSoft,
+      hasFinalRow
+    });
+  }
+
+  if (
+    anyPaidPending &&
+    !anyPaidDone &&
+    (closeOutDone || closeOutSoft || hasFinalRow)
+  ) {
+    console.log("✅ [Debug-Siding] Added to bucket:", jobName);
+    return {
+      trade: tradeKey,
+      bucket: `${prettyLabel} To Pay`,
+      reason: `${prettyLabel} unpaid but job complete (final row confirmed)`
+    };
+  }
+}
+
+
+
+
+if (tradeKey === "rails" && !tradeComplete) {
+  continue;
+}
+
+
+ // ✅ Require that trade is actually complete before surfacing "To Pay"
+if (
+  anyPaidPending &&
+  !anyPaidDone &&
+  tradeComplete &&                                 // 👈 hard requirement
+  (requireTradeComplete ? tradeComplete : (tradeComplete || closeOutDone || closeOutSoft))
+) {
+  return {
+    trade: tradeKey,
+    bucket: `${prettyLabel} To Pay`,
+    reason: `${prettyLabel} complete but unpaid (Paid-title unfinished)`
+  };
+}
+
 
     if (tradeComplete && !anyPaidDone) {
       return {
@@ -257,13 +307,14 @@ const TRADE_ACTIVITY_KEYWORDS = {
   "Gutters":       ["gutter","downspout","down spout"],
 };
 const TRADE_COMPLETE_TITLE_PATTERNS = {
-  "Siding": [/^siding complete\b/i, /^job complete\/inspected\b/i],
+  "Siding": [/^siding complete\b/i, /^job complete\/inspected\b/i, /^100% job complete\b/i], // 👈 add the global phrases here
   "Screen Porch": [/^screen porch complete\b/i, /^porch complete\b/i],
   "Porch": [/^porch complete\b/i],
-  "Rails": [/^rails complete\b/i],
+  "Rails": [/^rails complete\b/i],      // 👈 add this
   "House Wrap": [/^house wrap complete\b/i],
   "_global": [/^job complete\/inspected\b/i, /^100% job complete\b/i],
 };
+
 let TRADE_FINISH_STRICT = false;
 
 const PHRASES_INVOICE = ["invoice","ready to invoice","ready to bill","pay crew","ready to pay","bill now","billing","send invoice","invoice ready","ready for invoice"];
@@ -475,10 +526,6 @@ if (!result.bucket && invoiceOk && finalForClose) {
       "Invoice complete and job 100 % finished — trade work not needed (Columns/Porch skipped)";
   }
 }
-
-// ----------------- GLOBAL LIEN CHECK (runs last regardless of status) -----------------
-  // ----------------- any other classification logic above -----------------
-
 
   // ----------------- GLOBAL LIEN CHECK (runs last regardless of bucket) -----------------
   try {
@@ -1025,6 +1072,10 @@ columns.push({ header:"Jobs To Close", items:close });  // ✅ Add this line
   // 🪟 Render everything
   renderColumns(columns);
   const aoaOut = buildAOA(columns);
+// 🔍 Debugging: expose and inspect buckets
+window.allBuckets = Object.fromEntries(columns.map(c => [c.header, c.items]));
+console.log("📦 All bucket headers:", Object.keys(window.allBuckets));
+console.log("🧩 Siding bucket contents:", window.allBuckets["Siding To Pay"]);
 
   // 📥 Setup CSV download
   $download.onclick = () => {
