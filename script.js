@@ -525,24 +525,6 @@ if (unpaid) {
 }
 
 
-
-
-// ✅ DEBUG CHECK FOR DUAL BUCKET
-console.log("Flags → invoiceOk:", invoiceOk, "hasStrictFinal:", hasStrictFinal, "hasInspectedFinal:", hasInspectedFinal);
-
-if (unpaid && invoiceOk && hasStrictFinal && hasInspectedFinal) {
-  console.log(`✅ Adding duplicate close bucket for ${job}`);
-  result.duplicates.push({
-    bucket: "Jobs To Close",
-    reason: "Trade unpaid but invoice & finals done → ready to close too",
-    trade: null,
-    extra: null
-  });
-} else {
-  console.log(`🚫 No duplicate close bucket for ${job} (conditions not all met)`);
-}
-
-
 // ✅ NEW: If trade unpaid but invoice & finals are done → also mark for close
 if (
   unpaid &&
@@ -624,25 +606,6 @@ if (!invoiceOk) {
 }
 
 const finalCompleteForClose = hasStrictFinal && hasInspectedFinal;
-
-if (invoiceOk && finalCompleteForClose) {
-  if (result.bucket) {
-    result.duplicates.push({
-      bucket: "Jobs To Close",
-      reason:
-        'Invoice complete and BOTH "100% Job Complete" and "Job Complete/Inspected" rows are 100% → ready to close',
-      trade: null,
-      extra: null
-    });
-    return result;
-  }
-
-  result.bucket = "Jobs To Close";
-  result.reason =
-    'Invoice complete and BOTH "100% Job Complete" and "Job Complete/Inspected" rows are 100% → ready to close';
-    
-  return result;
-}
 
 // ✅ NEW RULE:
 // Include jobs in "Jobs To Close" even if one trade is unpaid,
@@ -1173,7 +1136,6 @@ function allBucketsForDecision(decision) {
   columns.push({ header: "Jobs To Invoice", items: invoice });
   columns.push({ header: "Jobs To Close",   items: close });
   columns.push({ header: "Liens Needed",    items: lien });
-columns.push({ header:"Jobs To Close", items:close });  // ✅ Add this line
 
   // 🪟 Render everything
   renderColumns(columns);
