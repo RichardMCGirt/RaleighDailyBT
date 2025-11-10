@@ -495,68 +495,47 @@ function decideForJob(job, records, info) {
     // 1) Invoice done AND finalForClose
     //    - If there is a trade to pay → keep trade as primary, add Jobs To Close as duplicate
     //    - If no trade to pay        → Jobs To Close only
-    if (invoiceOk && finalForClose) {
-      if (result.bucket) {
-        // Trade bucket exists (To Pay) → add Jobs To Close as duplicate
-        result.duplicates.push({
-          bucket: "Jobs To Close",
-          reason: "Invoice and 100% Job Complete are 100% → ready to close",
-          trade: null,
-          extra: null
-        });
-        return result;
-      }
+  // ----------------- CLOSE / INVOICE LOGIC -----------------
 
-      // ✅ NEW RULE: invoice complete + final complete → Close even if trade columns/porch not done
-if (!result.bucket && invoiceOk && finalForClose) {
-  // Detect trades marked 0 % but likely not needed
-  const unusedTrade = records.some(({ r }) => {
-    const t = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]).toLowerCase() : "";
-    const pct = info.percentCompleteIdx >= 0 ? numberish(r[info.percentCompleteIdx]) : NaN;
-    return (
-      (t.includes("column") || t.includes("columns") ||
-       t.includes("porch")  || t.includes("screen porch")) &&
-      (Number.isNaN(pct) || pct === 0)
-    );
-  });
+// ✅ Treat invoice+any strong final signal as fully ready to close
+// ----------------- CLOSE / INVOICE LOGIC -----------------
 
-  if (unusedTrade) {
-    result.bucket = "Jobs To Close";
-    result.reason =
-      "Invoice complete and job 100 % finished — trade work not needed (Columns/Porch skipped)";
-  }
-}
+// ✅ Treat invoice+any strong final signal as fully ready to close
+const finalCompleteForClose =
+  finalForClose || hasFinalDone(records, info) || hasAnyCloseOutSoft(records, info);
 
-  // ----------------- GLOBAL LIEN CHECK (runs last regardless of bucket) -----------------
-  try {
-    const hasLienPhrase = txts.some(s => /lien\b/i.test(s));
-    if (hasLienPhrase) {
-      const lienBucket = {
-        bucket: "Liens Needed",
-        reason: "Lien phrase found",
-        trade: null,
-        extra: null,
-        duplicates: []
-      };
-
-      // If there's already a main bucket, add lien as duplicate
-      if (result.bucket && result.bucket !== "Liens Needed") {
-        result.duplicates = result.duplicates || [];
-        result.duplicates.push(lienBucket);
-      }
-      // If there's no main bucket (like Brunswick case), make lien primary
-      else if (!result.bucket) {
-        result.bucket = "Liens Needed";
-        result.reason = "Lien phrase found (invoice complete but 100% job incomplete)";
-      }
-    }
-  } catch (e) {
-    console.warn("Lien check failed:", e);
+if (invoiceOk && finalForClose) {
+  if (result.bucket) {
+    // Trade bucket exists (To Pay) → also mark as duplicate Close
+    result.duplicates.push({
+      bucket: "Jobs To Close",
+      reason:
+        'Invoice complete and "100% Job Complete" row is 100% → ready to close',
+      trade: null,
+      extra: null
+    });
+    return result;
   }
 
-  // ----------------- RETURN FINAL RESULT -----------------
+  result.bucket = "Jobs To Close";
+  result.reason =
+    'Invoice complete and "100% Job Complete" row is 100% → ready to close';
   return result;
 }
+
+// ✅ Fallback: if *everything* (invoice, final, trades) is 100%, still force Close
+const allDone =
+  invoiceOk &&
+  hasFinalDone(records, info) &&
+  !anyUnpaidFinishedTrade(records, info); // no trades needing pay
+
+if (!result.bucket && allDone) {
+  result.bucket = "Jobs To Close";
+  result.reason =
+    "All key milestones (invoice, final, trades) are 100% → auto-close";
+  return result;
+}
+
 
 
     // 2) Invoice done BUT 100% Job Complete is NOT 100
