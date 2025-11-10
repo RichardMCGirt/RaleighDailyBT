@@ -335,21 +335,30 @@ const title = info.titleIdx >= 0 ? norm(safeCell(r[info.titleIdx])).trim().toLow
   return hasJCICompleted || hasJCIpct100; // "either"
 }
 
-function anyUnpaidFinishedTrade(records, info){
-  for (const trade of TRADES){
+// ✅ FIXED anyUnpaidFinishedTrade (no more tradeIsFinished undefined)
+function anyUnpaidFinishedTrade(records, info) {
+  for (const trade of TRADES) {
     if (IGNORED_TRADES.has(String(trade).toLowerCase())) continue;
-    if (!tradeIsFinished(trade, records, info)) continue;
 
+    // Check if this trade appears complete
+    const tradeFinished = hasTradeCompleteSignal(trade, records, info);
+    if (!tradeFinished) continue; // skip if trade not marked complete
+
+    // Check if the trade is unpaid
     const paidTruth = tradePaidTruthiness(trade, records, info);
-    if (paidTruth === false) return true;
+    if (paidTruth === false) return true; // explicitly unpaid
 
-    if (paidTruth === null){
+    // If we can’t tell from paidTruth, use textual "to pay" signals
+    if (paidTruth === null) {
       const tokens = tokensFor(trade);
       if (titleIndicatesTradeToPay(trade, records, info, tokens)) return true;
     }
   }
+
+  // No unpaid finished trades found
   return false;
 }
+
 function parseJobParts(str) {
   const s = String(str || "").trim();
   const m = s.match(/^(\d+)\s*(.*)$/);
@@ -431,6 +440,9 @@ function safeSome(arr, pred){
 }
 
 function decideForJob(job, records, info) {
+  console.groupCollapsed(`🔍 Debugging job: ${job}`);
+console.log("Records count:", records.length);
+
     const result = { bucket: null, reason: null, duplicates: [] };
 // ----------------- FINAL COMPLETION FLAGS (used by multiple buckets) -----------------
 const hasStrictFinal = records.some(
@@ -490,15 +502,64 @@ const hasInspectedFinal = records.some(
     // finalForInvoice: your broader "final done" (Job Complete/Inspected OR 100% Job Complete, 100% or Completed=TRUE)
     const finalForInvoice = hasFinalDone(records, info);
 
-    // ----------------- TRADES TO PAY (highest priority) -----------------
 
-    // Uses existing helper; returns { bucket, reason, trade } or null
-    const unpaid = findUnpaidTrade(records, info);
-    if (unpaid) {
-      result.bucket = unpaid.bucket;   // e.g. "Screen Porch To Pay"
-      result.reason = unpaid.reason;
-      result.trade  = unpaid.trade;
-    }
+// ----------------- TRADES TO PAY (highest priority) -----------------
+// ----------------- TRADES TO PAY (highest priority) -----------------
+const unpaid = findUnpaidTrade(records, info);
+if (unpaid) {
+  console.log(`⛔ Unpaid trade detected for ${job}:`, unpaid);
+  result.bucket = unpaid.bucket;
+  result.reason = unpaid.reason;
+  result.trade  = unpaid.trade;
+
+  // ✅ Only allow Close duplicate if invoice and strict final (100%) are both true
+  if (invoiceOk && hasStrictFinal) {
+    console.log(`✅ Adding duplicate Close bucket for ${job}`);
+    result.duplicates.push({
+      bucket: "Jobs To Close",
+      reason: "Invoice & 100% Job Complete done — only unpaid trade remains → ready to close",
+      trade: null,
+      extra: null
+    });
+  } else {
+    console.log(`🚫 Not adding Close duplicate — requires invoice=✅ and 100% Job Complete=✅`);
+  }
+}
+
+
+
+
+// ✅ DEBUG CHECK FOR DUAL BUCKET
+console.log("Flags → invoiceOk:", invoiceOk, "hasStrictFinal:", hasStrictFinal, "hasInspectedFinal:", hasInspectedFinal);
+
+if (unpaid && invoiceOk && hasStrictFinal && hasInspectedFinal) {
+  console.log(`✅ Adding duplicate close bucket for ${job}`);
+  result.duplicates.push({
+    bucket: "Jobs To Close",
+    reason: "Trade unpaid but invoice & finals done → ready to close too",
+    trade: null,
+    extra: null
+  });
+} else {
+  console.log(`🚫 No duplicate close bucket for ${job} (conditions not all met)`);
+}
+
+
+// ✅ NEW: If trade unpaid but invoice & finals are done → also mark for close
+if (
+  unpaid &&
+  invoiceOk &&
+  hasStrictFinal &&
+  hasInspectedFinal
+) {
+  result.duplicates.push({
+    bucket: "Jobs To Close",
+    reason: "Trade unpaid but invoice & finals done → ready to close too",
+    trade: null,
+    extra: null
+  });
+}
+
 // ✅ If a trade bucket exists but the job is fully invoiced & finaled,
 // also add Jobs To Close as duplicate
 // ✅ Add Jobs To Close as duplicate *only if* main close condition won't also run later
@@ -564,10 +625,6 @@ if (!invoiceOk) {
   }
 }
 
-
-
-
-
 const finalCompleteForClose = hasStrictFinal && hasInspectedFinal;
 
 if (invoiceOk && finalCompleteForClose) {
@@ -585,34 +642,35 @@ if (invoiceOk && finalCompleteForClose) {
   result.bucket = "Jobs To Close";
   result.reason =
     'Invoice complete and BOTH "100% Job Complete" and "Job Complete/Inspected" rows are 100% → ready to close';
+    
   return result;
 }
 
-const allDone =
+// ✅ NEW RULE:
+// Include jobs in "Jobs To Close" even if one trade is unpaid,
+// as long as invoice and finals are done.
+const unpaidTradesExist = anyUnpaidFinishedTrade(records, info);
+
+const readyForCloseEvenIfUnpaid =
   invoiceOk &&
   hasStrictFinal &&
   hasInspectedFinal &&
-  !anyUnpaidFinishedTrade(records, info);
+  unpaidTradesExist; // ← allow close even if unpaid trade exists
 
-if (!result.bucket && allDone) {
+const fullyReadyForClose =
+  invoiceOk &&
+  hasStrictFinal &&
+  hasInspectedFinal &&
+  !unpaidTradesExist;
+
+if (!result.bucket && (fullyReadyForClose || readyForCloseEvenIfUnpaid)) {
   result.bucket = "Jobs To Close";
-  result.reason =
-    "All key milestones (invoice, final, trades) are 100% → auto-close";
+  result.reason = readyForCloseEvenIfUnpaid
+    ? "Invoice and finals complete — only unpaid trade remains → move to close"
+    : "All key milestones (invoice, final, trades) are 100% → auto-close";
   return result;
 }
 
-
-
-
-
-    // 2) Invoice done BUT 100% Job Complete is NOT 100
-    //    - Do NOT put it in Jobs To Close
-    //    - If no trade bucket, suppress from UI (no bucket)
-    //
-    // This is the rule that will catch 61 Allston Park:
-    //   - Invoice 100% (invoiceOk = true)
-    //   - Job Complete/Inspected 100% BUT 100% Job Complete = 0% (finalForClose = false)
-    //   - No trade bucket → it will return with bucket=null
  if (invoiceOk && !finalForClose && !result.bucket) {
   // run lien detection before returning
   const hasLienPhrase = txts.some(s => /lien\b/i.test(s));
@@ -702,7 +760,8 @@ if (hasLienPhrase) {
     // ----------------- TRADES-ONLY CASE (no close/invoice conditions hit) -----------------
 
     if (result.bucket) {
-      // We had a trade bucket and no other rules overrode it
+console.log("🏁 Final decision object:", JSON.stringify(result, null, 2));
+console.groupEnd();
       return result;
     }
 // ✅ If a trade bucket exists (To Pay) and the job is fully invoiced + both finals done,
@@ -1064,16 +1123,17 @@ window.jobsToClose = jobsToClose;   // 👈 expose globally for console access
   const close = [];
   const lien = [];
 
-  function allBucketsForDecision(decision) {
-    const arr = [];
-    if (decision.bucket) arr.push(decision.bucket);
-    if (Array.isArray(decision.duplicates)) {
-      for (const dup of decision.duplicates) {
-        if (dup && dup.bucket) arr.push(dup.bucket);
-      }
+function allBucketsForDecision(decision) {
+  const arr = [];
+  if (decision.bucket) arr.push(decision.bucket);
+  if (Array.isArray(decision.duplicates)) {
+    for (const dup of decision.duplicates) {
+      if (dup && dup.bucket) arr.push(dup.bucket);
     }
-    return arr;
   }
+  return arr;
+}
+
 
   // 🧩 Per-trade buckets
   for (const trade of TRADES) {
