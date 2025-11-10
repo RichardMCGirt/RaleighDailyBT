@@ -502,8 +502,6 @@ const hasInspectedFinal = records.some(
     // finalForInvoice: your broader "final done" (Job Complete/Inspected OR 100% Job Complete, 100% or Completed=TRUE)
     const finalForInvoice = hasFinalDone(records, info);
 
-
-// ----------------- TRADES TO PAY (highest priority) -----------------
 // ----------------- TRADES TO PAY (highest priority) -----------------
 const unpaid = findUnpaidTrade(records, info);
 if (unpaid) {
@@ -959,9 +957,16 @@ $file.addEventListener('change', async ()=>{
 
     $countBadge.textContent = `${totalRows} rows`;
     $summary.textContent = files.length ? `Ready. ${files.length} file(s) parsed. Click Compute.` : "No results yet.";
-    log(`Parsed ${files.length} file(s). Total data rows across files: ${totalRows}`, "ok");
+log(`Parsed ${files.length} file(s). Total data rows across files: ${totalRows}`, "ok");
+
+// 👇 Auto-run classification after upload
+if (files.length > 0) {
+  log("Auto-starting classification...");
+  $run.click(); // simulate clicking the Compute button automatically
+}
   }catch(e){ log(e?.message||String(e), "err"); }
 });
+
 
 /* ----------------- main ------------------- */
 $run.addEventListener('click', () => {
