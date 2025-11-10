@@ -228,58 +228,50 @@ function findUnpaidTrade(records, info){
 if (tradeKey === "siding") {
   const jobName = records[0]?.r?.[info.keyIdx] || "(unknown job)";
 
-  // detect a final-done row manually
-  const hasFinalRow = rows.some(
-    x =>
-      /job\s*complete|inspected/i.test(x.s) &&
-      Number(x.p) >= 100
-  );
+  // detect "Job Complete/Inspected" only (ignore 100% Job Complete)
+  const inspectedFinalDone = records.some(({ r }) => {
+    const title = String(r[info.titleIdx] || "").toLowerCase();
+    const pct   = Number(r[info.percentCompleteIdx] || 0);
+    const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+    return (
+      title.includes("job complete/inspected") &&
+      (done || pct >= 100)
+    );
+  });
 
-  if (/calabash/i.test(jobName)) {
-    console.log("🧩 [Debug-Siding] Job:", jobName, {
-      anyPaidPending,
-      anyPaidDone,
-      closeOutDone,
-      closeOutSoft,
-      hasFinalRow
-    });
-  }
+  const inspectedFinalPresent = records.some(({ r }) => {
+    const title = String(r[info.titleIdx] || "").toLowerCase();
+    return title.includes("job complete/inspected");
+  });
 
-  if (
-    anyPaidPending &&
-    !anyPaidDone &&
-    (closeOutDone || closeOutSoft || hasFinalRow)
-  ) {
-    console.log("✅ [Debug-Siding] Added to bucket:", jobName);
+  console.log("🧩 [Debug-Siding]", {
+    jobName,
+    anyPaidPending,
+    anyPaidDone,
+    inspectedFinalDone,
+    inspectedFinalPresent
+  });
+
+  // ✅ Only add Siding To Pay if unpaid AND inspected final is done
+  if (anyPaidPending && !anyPaidDone && inspectedFinalDone) {
+    console.log("✅ [Siding To Pay triggered]:", jobName);
     return {
       trade: tradeKey,
       bucket: `${prettyLabel} To Pay`,
-      reason: `${prettyLabel} unpaid but job complete (final row confirmed)`
+      reason: `${prettyLabel} unpaid but job inspected complete`,
     };
+  }
+
+  // ❌ If inspected final present but not done → skip Siding To Pay entirely
+  if (anyPaidPending && !anyPaidDone && inspectedFinalPresent && !inspectedFinalDone) {
+    console.log("🚫 [Skip Siding To Pay - inspected not done]:", jobName);
+    continue;
   }
 }
 
 
+  
 
-
-if (tradeKey === "rails" && !tradeComplete) {
-  continue;
-}
-
-
- // ✅ Require that trade is actually complete before surfacing "To Pay"
-if (
-  anyPaidPending &&
-  !anyPaidDone &&
-  tradeComplete &&                                 // 👈 hard requirement
-  (requireTradeComplete ? tradeComplete : (tradeComplete || closeOutDone || closeOutSoft))
-) {
-  return {
-    trade: tradeKey,
-    bucket: `${prettyLabel} To Pay`,
-    reason: `${prettyLabel} complete but unpaid (Paid-title unfinished)`
-  };
-}
 
 
     if (tradeComplete && !anyPaidDone) {
@@ -434,6 +426,19 @@ function safeSome(arr, pred){
 }
 
 function decideForJob(job, records, info) {
+    const result = { bucket: null, reason: null, duplicates: [] };
+// ----------------- FINAL COMPLETION FLAGS (used by multiple buckets) -----------------
+const hasStrictFinal = records.some(
+  ({ r }) =>
+    /100% job complete/i.test(String(r[info.titleIdx] || "")) &&
+    Number(r[info.percentCompleteIdx] || 0) >= 100
+);
+const hasInspectedFinal = records.some(
+  ({ r }) =>
+    /job complete\/inspected/i.test(String(r[info.titleIdx] || "")) &&
+    Number(r[info.percentCompleteIdx] || 0) >= 100
+);
+
   try {
     // Default decision object structure
     const result = {
@@ -491,26 +496,66 @@ function decideForJob(job, records, info) {
     }
 
     // ----------------- CLOSE / INVOICE LOGIC -----------------
+console.log(`[Debug-Invoice] ${job}`, {
+  invoiceOk,
+  hasStrictFinal,
+  hasInspectedFinal,
+  finalForClose,
+});
 
-    // 1) Invoice done AND finalForClose
-    //    - If there is a trade to pay → keep trade as primary, add Jobs To Close as duplicate
-    //    - If no trade to pay        → Jobs To Close only
-  // ----------------- CLOSE / INVOICE LOGIC -----------------
+// Detect strict + inspected final rows
 
-// ✅ Treat invoice+any strong final signal as fully ready to close
-// ----------------- CLOSE / INVOICE LOGIC -----------------
 
-// ✅ Treat invoice+any strong final signal as fully ready to close
-const finalCompleteForClose =
-  finalForClose || hasFinalDone(records, info) || hasAnyCloseOutSoft(records, info);
+// ✅ Only mark Jobs To Invoice if BOTH finals are complete and invoice isn't done
+// ----------------- JOBS TO INVOICE LOGIC -----------------
+// ----------------- JOBS TO INVOICE -----------------
 
-if (invoiceOk && finalForClose) {
+if (!invoiceOk) {
+  const inspectedFinalDone = records.some(({ r }) => {
+    const title = String(r[info.titleIdx] || "").toLowerCase();
+    const pct   = Number(r[info.percentCompleteIdx] || 0);
+    const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+    return (
+      title.includes("job complete/inspected") &&
+      (done || pct >= 100)
+    );
+  });
+
+  // 🚫 Skip if inspected row missing or not done
+  if (!inspectedFinalDone) {
+    console.log("🚫 [Skip Invoice] inspected final not done for job");
+    return result;
+  }
+
+  const invoiceBucket = {
+    bucket: "Jobs To Invoice",
+    reason:
+      "Inspected final complete, but invoice still 0% or partial → needs invoicing",
+    trade: null,
+    extra: null,
+  };
+
+  // if trade already exists, make invoice a duplicate
   if (result.bucket) {
-    // Trade bucket exists (To Pay) → also mark as duplicate Close
+    result.duplicates.push(invoiceBucket);
+  } else {
+    result.bucket = invoiceBucket.bucket;
+    result.reason = invoiceBucket.reason;
+  }
+}
+
+
+
+
+
+const finalCompleteForClose = hasStrictFinal && hasInspectedFinal;
+
+if (invoiceOk && finalCompleteForClose) {
+  if (result.bucket) {
     result.duplicates.push({
       bucket: "Jobs To Close",
       reason:
-        'Invoice complete and "100% Job Complete" row is 100% → ready to close',
+        'Invoice complete and BOTH "100% Job Complete" and "Job Complete/Inspected" rows are 100% → ready to close',
       trade: null,
       extra: null
     });
@@ -519,15 +564,15 @@ if (invoiceOk && finalForClose) {
 
   result.bucket = "Jobs To Close";
   result.reason =
-    'Invoice complete and "100% Job Complete" row is 100% → ready to close';
+    'Invoice complete and BOTH "100% Job Complete" and "Job Complete/Inspected" rows are 100% → ready to close';
   return result;
 }
 
-// ✅ Fallback: if *everything* (invoice, final, trades) is 100%, still force Close
 const allDone =
   invoiceOk &&
-  hasFinalDone(records, info) &&
-  !anyUnpaidFinishedTrade(records, info); // no trades needing pay
+  hasStrictFinal &&
+  hasInspectedFinal &&
+  !anyUnpaidFinishedTrade(records, info);
 
 if (!result.bucket && allDone) {
   result.bucket = "Jobs To Close";
@@ -535,6 +580,8 @@ if (!result.bucket && allDone) {
     "All key milestones (invoice, final, trades) are 100% → auto-close";
   return result;
 }
+
+
 
 
 
@@ -567,27 +614,6 @@ if (!result.bucket && allDone) {
     extra: null,
     duplicates: []
   };
-}
-
-
-    // 3) Final done (for invoice) AND invoice present but NOT done (0% or partial)
-    //    ⇒ Jobs To Invoice (either as primary or duplicate)
-    // 3) Final done (for invoice) AND invoice present but NOT done (0% or partial)
-if (finalForInvoice && invoicePresentFlag && !invoiceDone) {
-  const invoiceBucket = {
-    bucket: "Jobs To Invoice",
-    reason: "Final completion done but invoice is still 0% or partial",
-    trade: null,
-    extra: null,
-    duplicates: []
-  };
-
-  if (result.bucket) {
-    result.duplicates.push(invoiceBucket);
-  } else {
-    result.bucket = "Jobs To Invoice";
-    result.reason = "Final completion done but invoice is still 0% or partial";
-  }
 }
 
 // 4) Final done (for invoice) AND no invoice row at all
