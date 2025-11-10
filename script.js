@@ -266,18 +266,24 @@ function findUnpaidTrade(records, info) {
 
     // ---------- GENERAL FALLBACK for other trades ----------
     // For trades like Columns, Porch, etc.
-    if (anyPaidPending && !anyPaidDone) {
-      // If trade requires completion, ensure it's done
-      if (!requireTradeComplete || tradeComplete) {
-        const jobName = records[0]?.r?.[info.keyIdx] || "(unknown job)";
-        console.log(`✅ [${prettyLabel} To Pay triggered]:`, jobName);
-        return {
-          trade: tradeKey,
-          bucket: `${prettyLabel} To Pay`,
-          reason: `${prettyLabel} unpaid but trade complete`,
-        };
-      }
-    }
+  // ---------- GENERAL FALLBACK for other trades ----------
+if (anyPaidPending && !anyPaidDone) {
+  const jobName = records[0]?.r?.[info.keyIdx] || "(unknown job)";
+  const tradeReallyComplete = hasTradeCompleteSignal(prettyLabel, records, info);
+
+  // 🧠 Require trade to actually be complete (TRUE or % ≥ 100)
+  if (tradeReallyComplete) {
+    console.log(`✅ [${prettyLabel} To Pay triggered]:`, jobName);
+    return {
+      trade: tradeKey,
+      bucket: `${prettyLabel} To Pay`,
+      reason: `${prettyLabel} unpaid but trade complete`,
+    };
+  } else {
+    console.log(`🚫 [Skip ${prettyLabel} To Pay – trade not complete]:`, jobName);
+  }
+}
+
   }
 
   return null;
@@ -495,20 +501,25 @@ const hasInspectedFinal = records.some(
     }
 // ✅ If a trade bucket exists but the job is fully invoiced & finaled,
 // also add Jobs To Close as duplicate
+// ✅ Add Jobs To Close as duplicate *only if* main close condition won't also run later
 if (
   result.bucket &&
   result.bucket.endsWith("To Pay") &&
   invoiceOk &&
   hasStrictFinal &&
-  hasInspectedFinal
+  hasInspectedFinal &&
+  !finalForClose // 👈 prevent duplicate when 100% job complete already true
 ) {
-  result.duplicates.push({
-    bucket: "Jobs To Close",
-    reason: "Trade finished unpaid but all finals + invoice done → ready to close as well",
-    trade: null,
-    extra: null
-  });
+  if (!result.duplicates.some(d => d.bucket === "Jobs To Close")) {
+    result.duplicates.push({
+      bucket: "Jobs To Close",
+      reason: "Trade finished unpaid but all finals + invoice done → ready to close as well",
+      trade: null,
+      extra: null
+    });
+  }
 }
+
 
     // ----------------- CLOSE / INVOICE LOGIC -----------------
 console.log(`[Debug-Invoice] ${job}`, {
@@ -518,12 +529,6 @@ console.log(`[Debug-Invoice] ${job}`, {
   finalForClose,
 });
 
-// Detect strict + inspected final rows
-
-
-// ✅ Only mark Jobs To Invoice if BOTH finals are complete and invoice isn't done
-// ----------------- JOBS TO INVOICE LOGIC -----------------
-// ----------------- JOBS TO INVOICE -----------------
 
 if (!invoiceOk) {
   const inspectedFinalDone = records.some(({ r }) => {
