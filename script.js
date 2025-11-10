@@ -209,7 +209,7 @@ function hasTradeWorkComplete(trade, records, info, tokens){
   });
 }
 
-function findUnpaidTrade(records, info){
+function findUnpaidTrade(records, info) {
   const rows = records.map(({ r }) => ({ r, s: textOf(r, info) }));
   const closeOutDone = hasAnyCloseOutComplete(records, info);
   const closeOutSoft = hasAnyCloseOutSoft(records, info);
@@ -217,6 +217,7 @@ function findUnpaidTrade(records, info){
   for (const prettyLabel of TRADES) {
     const tradeKey = prettyLabel.toLowerCase();
     if (IGNORED_TRADES.has(tradeKey)) continue;
+
     const tokens = tokensFor(prettyLabel);
     const tradeComplete = hasTradeCompleteSignal(prettyLabel, records, info);
     const paidRows = rows.filter(x => x.s.includes("paid") && tokens.some(t => x.s.includes(t)));
@@ -224,66 +225,64 @@ function findUnpaidTrade(records, info){
     const anyPaidDone    = paidRows.some(x =>  rowIsCompleted(x.r, info));
     const requireTradeComplete = STRICT_COMPLETION_TRADES.has(tradeKey);
 
-    // Special case: allow Siding To Pay if job is globally complete but not paid
-if (tradeKey === "siding") {
-  const jobName = records[0]?.r?.[info.keyIdx] || "(unknown job)";
+    // ---------- SIDING special case ----------
+    if (tradeKey === "siding") {
+      const jobName = records[0]?.r?.[info.keyIdx] || "(unknown job)";
 
-  // detect "Job Complete/Inspected" only (ignore 100% Job Complete)
-  const inspectedFinalDone = records.some(({ r }) => {
-    const title = String(r[info.titleIdx] || "").toLowerCase();
-    const pct   = Number(r[info.percentCompleteIdx] || 0);
-    const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
-    return (
-      title.includes("job complete/inspected") &&
-      (done || pct >= 100)
-    );
-  });
+      const inspectedFinalDone = records.some(({ r }) => {
+        const title = String(r[info.titleIdx] || "").toLowerCase();
+        const pct   = Number(r[info.percentCompleteIdx] || 0);
+        const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+        return title.includes("job complete/inspected") && (done || pct >= 100);
+      });
 
-  const inspectedFinalPresent = records.some(({ r }) => {
-    const title = String(r[info.titleIdx] || "").toLowerCase();
-    return title.includes("job complete/inspected");
-  });
+      const inspectedFinalPresent = records.some(({ r }) => {
+        const title = String(r[info.titleIdx] || "").toLowerCase();
+        return title.includes("job complete/inspected");
+      });
 
-  console.log("🧩 [Debug-Siding]", {
-    jobName,
-    anyPaidPending,
-    anyPaidDone,
-    inspectedFinalDone,
-    inspectedFinalPresent
-  });
+      console.log("🧩 [Debug-Siding]", {
+        jobName,
+        anyPaidPending,
+        anyPaidDone,
+        inspectedFinalDone,
+        inspectedFinalPresent
+      });
 
-  // ✅ Only add Siding To Pay if unpaid AND inspected final is done
-  if (anyPaidPending && !anyPaidDone && inspectedFinalDone) {
-    console.log("✅ [Siding To Pay triggered]:", jobName);
-    return {
-      trade: tradeKey,
-      bucket: `${prettyLabel} To Pay`,
-      reason: `${prettyLabel} unpaid but job inspected complete`,
-    };
-  }
+      if (anyPaidPending && !anyPaidDone && inspectedFinalDone) {
+        console.log("✅ [Siding To Pay triggered]:", jobName);
+        return {
+          trade: tradeKey,
+          bucket: `${prettyLabel} To Pay`,
+          reason: `${prettyLabel} unpaid but job inspected complete`,
+        };
+      }
 
-  // ❌ If inspected final present but not done → skip Siding To Pay entirely
-  if (anyPaidPending && !anyPaidDone && inspectedFinalPresent && !inspectedFinalDone) {
-    console.log("🚫 [Skip Siding To Pay - inspected not done]:", jobName);
-    continue;
-  }
-}
+      if (anyPaidPending && !anyPaidDone && inspectedFinalPresent && !inspectedFinalDone) {
+        console.log("🚫 [Skip Siding To Pay - inspected not done]:", jobName);
+        continue;
+      }
+    }
 
-
-  
-
-
-
-    if (tradeComplete && !anyPaidDone) {
-      return {
-        trade: tradeKey,
-        bucket: `${prettyLabel} To Pay`,
-        reason: `${prettyLabel} complete without payment`
-      };
+    // ---------- GENERAL FALLBACK for other trades ----------
+    // For trades like Columns, Porch, etc.
+    if (anyPaidPending && !anyPaidDone) {
+      // If trade requires completion, ensure it's done
+      if (!requireTradeComplete || tradeComplete) {
+        const jobName = records[0]?.r?.[info.keyIdx] || "(unknown job)";
+        console.log(`✅ [${prettyLabel} To Pay triggered]:`, jobName);
+        return {
+          trade: tradeKey,
+          bucket: `${prettyLabel} To Pay`,
+          reason: `${prettyLabel} unpaid but trade complete`,
+        };
+      }
     }
   }
+
   return null;
 }
+
 
 const READY_INVOICE_MODE = "strict";
 const REQUIRE_INVOICE_PHRASE_FOR_BUCKET = false;
@@ -494,6 +493,22 @@ const hasInspectedFinal = records.some(
       result.reason = unpaid.reason;
       result.trade  = unpaid.trade;
     }
+// ✅ If a trade bucket exists but the job is fully invoiced & finaled,
+// also add Jobs To Close as duplicate
+if (
+  result.bucket &&
+  result.bucket.endsWith("To Pay") &&
+  invoiceOk &&
+  hasStrictFinal &&
+  hasInspectedFinal
+) {
+  result.duplicates.push({
+    bucket: "Jobs To Close",
+    reason: "Trade finished unpaid but all finals + invoice done → ready to close as well",
+    trade: null,
+    extra: null
+  });
+}
 
     // ----------------- CLOSE / INVOICE LOGIC -----------------
 console.log(`[Debug-Invoice] ${job}`, {
@@ -685,6 +700,22 @@ if (hasLienPhrase) {
       // We had a trade bucket and no other rules overrode it
       return result;
     }
+// ✅ If a trade bucket exists (To Pay) and the job is fully invoiced + both finals done,
+// also add Jobs To Close as a duplicate.
+if (
+  result.bucket &&
+  result.bucket.endsWith("To Pay") &&
+  invoiceOk &&
+  hasStrictFinal &&
+  hasInspectedFinal
+) {
+  result.duplicates.push({
+    bucket: "Jobs To Close",
+    reason: "Trade finished unpaid but all finals + invoice done → ready to close as well",
+    trade: null,
+    extra: null
+  });
+}
 
     // ----------------- NOTHING MATCHED -----------------
     return {
@@ -1465,12 +1496,15 @@ function looksLikeBannerMetrics(m){ return (m.repeatRatio >= 0.7 && m.avgLen >= 
 
 /* ----------------- column detection -------- */
 function detectColumnsFrom(headerRow){
+
   const first = headerRow || [];
   const keyIdx = findHeader(first, ["job","title","address","lot","project","name"]);
   const titleIdx = findHeader(first, ["title"], true);
   const phaseIdx = findHeader(first, ["phase"], true);
   const allNotesIdx = findHeader(first, ["all notes","notes","internal notes","sub/vendor notes","client notes"], true);
   const completedIdx = findHeader(first, ["completed"], true);
+    const columnsCompleteIdx = findHeader(first, ["columns complete","column complete"], true);
+
   const percentCompleteIdx = findHeader(first, ["percent complete","percentcomplete"], true);
   const paidByTrade = {}; const toPayByTrade = {};
   for (const t of TRADES) {
@@ -1480,7 +1514,10 @@ function detectColumnsFrom(headerRow){
     if (paid >= 0) paidByTrade[t] = paid;
     if (toPay >= 0) toPayByTrade[t] = toPay;
   }
-  return { keyIdx: keyIdx>=0 ? keyIdx : 0, titleIdx, phaseIdx, allNotesIdx, completedIdx, percentCompleteIdx, paidByTrade, toPayByTrade };
+return { keyIdx, titleIdx, phaseIdx, allNotesIdx,
+         completedIdx, percentCompleteIdx,
+         columnsCompleteIdx,  // 👈 add this
+         paidByTrade, toPayByTrade };
 }
 
 function findHeader(firstRow, candidates, optional=false){
@@ -1657,37 +1694,57 @@ const ALIASES = {
   }
 };
 
-
-// ---------- Core unpaid-finished detector ----------
 function getTradesToPay(records, info) {
   const trades = [];
 
-  // Columns: only flag when finished AND not paid
-  const colFinished = anyDoneByTitle(records, info, ALIASES.columns.complete);
-  const colPaid     = anyDoneByTitle(records, info, ALIASES.columns.paid);
+  // ---------- 1️⃣ Check if there is any explicit trade completion row ----------
+  const hasColumnCompleteRow = records.some(({ r }) => {
+    const title = safeCell(r[info.titleIdx]).toLowerCase();
+    return /columns?\s+complete/.test(title);
+  });
 
-  // ✅ NEW hard guard: if paid is true and finished, never include
-  if (colFinished && colPaid) {
-    vlog("[Skip Columns] already finished & paid → hide from all buckets");
-    return trades; // return empty, skip Columns entirely
-  }
+  // ---------- 2️⃣ Trade-specific completion (TRUE/100%) ----------
+  const colFinished =
+    info.columnsCompleteIdx >= 0
+      ? records.some(({ r }) => isTruthy(r[info.columnsCompleteIdx]))
+      : records.some(({ r }) => {
+          const title = safeCell(r[info.titleIdx]).toLowerCase();
+          const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+          const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+          return /columns?\s+complete/.test(title) && (done || pct >= 100);
+        });
 
-  // Only flag when finished but not paid
- // --- Guard: Only flag Columns if a subcontractor was actually involved ---
-const hasSubInvolved = records.some(({ r }) => {
-  const title = info.titleIdx >= 0 ? safeCell(r[info.titleIdx]).toLowerCase() : "";
-  return title.includes("paid siding sub") || title.includes("subcontractor");
-});
+  // ---------- 3️⃣ Global final fallback ----------
+  const globalFinalDone = records.some(({ r }) => {
+    const title = safeCell(r[info.titleIdx]).toLowerCase();
+    const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+    const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+    return (
+      (title.includes("job complete/inspected") || title.includes("100% job complete")) &&
+      (done || pct >= 100)
+    );
+  });
 
-// Only mark Columns To Pay if finished, not paid, and sub was involved
-if (colFinished && !colPaid && hasSubInvolved) {
+  // ✅ NEW RULE:
+  // - If we found a specific Column Complete row → use its completion state directly.
+  // - If there is no Column Complete row at all → fall back to global final done.
+  const effectiveFinished = hasColumnCompleteRow ? colFinished : globalFinalDone;
+
+  // ---------- 4️⃣ Paid / sub checks ----------
+  const colPaid = anyDoneByTitle(records, info, ALIASES.columns.paid);
+
+  const hasSubInvolved = records.some(({ r }) => {
+    const t = safeCell(r[info.titleIdx]).toLowerCase();
+    return t.includes("paid siding sub") || t.includes("subcontractor");
+  });
+
+  // ---------- 5️⃣ Apply trade logic ----------
+if (effectiveFinished && !colPaid) {
   trades.push("Columns");
-} else if (colFinished && !colPaid && !hasSubInvolved) {
-  vlog("[Skip Columns] finished but no subcontractor involvement → skip Columns To Pay");
 }
 
 
-  // Defensive: remove Columns if any Paid-row exists (even incomplete)
+  // Defensive: remove if any paid row exists
   if (colPaid) {
     const idx = trades.indexOf("Columns");
     if (idx >= 0) trades.splice(idx, 1);
@@ -1695,6 +1752,9 @@ if (colFinished && !colPaid && hasSubInvolved) {
 
   return trades;
 }
+
+
+
 
 // 🧩 Improved key generator for consistent job name matching
 function makeJobKey(str) {
