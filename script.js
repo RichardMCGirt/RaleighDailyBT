@@ -14,25 +14,27 @@ function safeCell(v) {
   return String(v).trim();
 }function norm(s){ return String(s||"").toLowerCase().replace(/[^a-z0-9]+/g,""); }
 function isTruthy(v) {
-  if (v == null) return false;
+  if (v === true) return true;
+  if (v === false || v == null) return false;
 
-  // Handle boolean values directly
-  if (typeof v === "boolean") return v === true;
+  if (typeof v === "number") {
+    // Treat only non-zero as true
+    return v !== 0;
+  }
 
-  const t = String(v).trim().toLowerCase();
-  if (t === "") return false;
+  const s = String(v).trim().toLowerCase();
+  if (s === "") return false;
 
-  return [
-    "true",
-    "1",
-    "yes",
-    "y",
-    "to pay",
-    "pay",
-    "x",
-    "✓"
-  ].includes(t);
-}function isFalse(v){ const t=String(v).trim().toLowerCase(); return t==="false"||t==="0"||t==="no"; }
+  // Explicit falsy first
+  if (["false", "0", "no", "n", "✗", "x"].includes(s)) return false;
+
+  // Explicit truthy
+  if (["true", "1", "yes", "y", "✓", "done", "complete"].includes(s)) return true;
+
+  // Anything else = false (be conservative)
+  return false;
+}
+function isFalse(v){ const t=String(v).trim().toLowerCase(); return t==="false"||t==="0"||t==="no"; }
 function dateStamp(){ const d=new Date(); const mm=String(d.getMonth()+1).padStart(2,'0'); const dd=String(d.getDate()).padStart(2,'0'); const yyyy=String(d.getFullYear()); return `${mm}-${dd}-${yyyy}`; }
 function colLetterFromIndex(i){ let n=i+1,s=""; while(n>0){ const m=(n-1)%26; s=String.fromCharCode(65+m)+s; n=Math.floor((n-1)/26);} return s; }
 function dumpRow(label, row, n=30){ const cells=(row||[]).slice(0,n).map((v,i)=>`${colLetterFromIndex(i)}:${safeCell(v)}`); vlog(`${label}: ${cells.join(" | ")}`); }
@@ -41,13 +43,12 @@ function contains(hay, needle){
   const n = String(needle || "").toLowerCase();
   return h.includes(n);
 }
-function numberish(v){
-  // Treat empty / null as "no number"
-  if (v === "" || v == null) return NaN;
-
-  // Basic numeric conversion (matches how you use Number(...) elsewhere)
-  const n = Number(v);
-  return isNaN(n) ? NaN : n;
+function numberish(v) {
+  if (typeof v === "number") return isFinite(v) ? v : 0;
+  const s = String(v ?? "").replace(/[,()%]/g, "").trim();
+  if (s === "" || s.toLowerCase() === "nan") return 0;
+  const n = +s;
+  return isFinite(n) ? n : 0;
 }
 function invoicePresent(records, info) {
   if (info.titleIdx < 0) return false;
@@ -241,16 +242,9 @@ function findUnpaidTrade(records, info) {
         return title.includes("job complete/inspected");
       });
 
-      console.log("🧩 [Debug-Siding]", {
-        jobName,
-        anyPaidPending,
-        anyPaidDone,
-        inspectedFinalDone,
-        inspectedFinalPresent
-      });
+   
 
       if (anyPaidPending && !anyPaidDone && inspectedFinalDone) {
-        console.log("✅ [Siding To Pay triggered]:", jobName);
         return {
           trade: tradeKey,
           bucket: `${prettyLabel} To Pay`,
@@ -259,7 +253,6 @@ function findUnpaidTrade(records, info) {
       }
 
       if (anyPaidPending && !anyPaidDone && inspectedFinalPresent && !inspectedFinalDone) {
-        console.log("🚫 [Skip Siding To Pay - inspected not done]:", jobName);
         continue;
       }
     }
@@ -273,14 +266,12 @@ if (anyPaidPending && !anyPaidDone) {
 
   // 🧠 Require trade to actually be complete (TRUE or % ≥ 100)
   if (tradeReallyComplete) {
-    console.log(`✅ [${prettyLabel} To Pay triggered]:`, jobName);
     return {
       trade: tradeKey,
       bucket: `${prettyLabel} To Pay`,
       reason: `${prettyLabel} unpaid but trade complete`,
     };
   } else {
-    console.log(`🚫 [Skip ${prettyLabel} To Pay – trade not complete]:`, jobName);
   }
 }
 
@@ -440,24 +431,7 @@ function safeSome(arr, pred){
 }
 
 function decideForJob(job, records, info) {
-  console.groupCollapsed(`🔍 Debugging job: ${job}`);
-console.log("Records count:", records.length);
-
-    const result = { bucket: null, reason: null, duplicates: [] };
-// ----------------- FINAL COMPLETION FLAGS (used by multiple buckets) -----------------
-const hasStrictFinal = records.some(
-  ({ r }) =>
-    /100% job complete/i.test(String(r[info.titleIdx] || "")) &&
-    Number(r[info.percentCompleteIdx] || 0) >= 100
-);
-const hasInspectedFinal = records.some(
-  ({ r }) =>
-    /job complete\/inspected/i.test(String(r[info.titleIdx] || "")) &&
-    Number(r[info.percentCompleteIdx] || 0) >= 100
-);
-
   try {
-    // Default decision object structure
     const result = {
       bucket: null,
       reason: "",
@@ -466,290 +440,153 @@ const hasInspectedFinal = records.some(
       duplicates: []
     };
 
-    // Basic invoice flags
+    // ----------------- BASIC FLAGS -----------------
     const invoicePresentFlag = invoicePresent(records, info);
-    const invoiceDone        = hasInvoicedDone(records, info);
-    const invoiceOk          = invoicePresentFlag && invoiceDone;
-
-    // Use global meta if not passed
+    const invoiceDone = hasInvoicedDone(records, info);
+    const invoiceOk = invoicePresentFlag && invoiceDone;
     info = info || state?.info || window.info || {};
 
-    // Flatten text for simple phrase searches (liens, invoice text)
-    const txts = records.map(({ r }) =>
-      [r[info.phaseIdx], r[info.titleIdx], r[info.allNotesIdx]]
-        .filter(Boolean)
-        .join(" | ")
-        .toLowerCase()
-    );
-
     // ----------------- FINAL FLAGS -----------------
-    // finalForClose: ONLY "100% Job Complete" at 100% (this controls Jobs To Close)
-    const finalForClose = records.some(({ r }) => {
-      const title = info.titleIdx >= 0
-        ? safeCell(r[info.titleIdx]).toLowerCase()
-        : "";
-      const pct = info.percentCompleteIdx >= 0
-        ? numberish(r[info.percentCompleteIdx])
-        : NaN;
-
-      return (
-        title.includes("100% job complete") &&
-        !Number.isNaN(pct) &&
-        pct >= 100
-      );
-    });
-
-    // finalForInvoice: your broader "final done" (Job Complete/Inspected OR 100% Job Complete, 100% or Completed=TRUE)
-    const finalForInvoice = hasFinalDone(records, info);
-
-// ----------------- TRADES TO PAY (highest priority) -----------------
-const unpaid = findUnpaidTrade(records, info);
-if (unpaid) {
-  console.log(`⛔ Unpaid trade detected for ${job}:`, unpaid);
-  result.bucket = unpaid.bucket;
-  result.reason = unpaid.reason;
-  result.trade  = unpaid.trade;
-
-  // ✅ Only allow Close duplicate if invoice and strict final (100%) are both true
-  if (invoiceOk && hasStrictFinal) {
-    console.log(`✅ Adding duplicate Close bucket for ${job}`);
-    result.duplicates.push({
-      bucket: "Jobs To Close",
-      reason: "Invoice & 100% Job Complete done — only unpaid trade remains → ready to close",
-      trade: null,
-      extra: null
-    });
-  } else {
-    console.log(`🚫 Not adding Close duplicate — requires invoice=✅ and 100% Job Complete=✅`);
-  }
-}
-
-
-// ✅ NEW: If trade unpaid but invoice & finals are done → also mark for close
-if (
-  unpaid &&
-  invoiceOk &&
-  hasStrictFinal &&
-  hasInspectedFinal
-) {
-  result.duplicates.push({
-    bucket: "Jobs To Close",
-    reason: "Trade unpaid but invoice & finals done → ready to close too",
-    trade: null,
-    extra: null
-  });
-}
-
-// ✅ If a trade bucket exists but the job is fully invoiced & finaled,
-// also add Jobs To Close as duplicate
-// ✅ Add Jobs To Close as duplicate *only if* main close condition won't also run later
-if (
-  result.bucket &&
-  result.bucket.endsWith("To Pay") &&
-  invoiceOk &&
-  hasStrictFinal &&
-  hasInspectedFinal &&
-  !finalForClose // 👈 prevent duplicate when 100% job complete already true
-) {
-  if (!result.duplicates.some(d => d.bucket === "Jobs To Close")) {
-    result.duplicates.push({
-      bucket: "Jobs To Close",
-      reason: "Trade finished unpaid but all finals + invoice done → ready to close as well",
-      trade: null,
-      extra: null
-    });
-  }
-}
-
-
-    // ----------------- CLOSE / INVOICE LOGIC -----------------
-console.log(`[Debug-Invoice] ${job}`, {
-  invoiceOk,
-  hasStrictFinal,
-  hasInspectedFinal,
-  finalForClose,
-});
-
-
-if (!invoiceOk) {
-  const inspectedFinalDone = records.some(({ r }) => {
-    const title = String(r[info.titleIdx] || "").toLowerCase();
-    const pct   = Number(r[info.percentCompleteIdx] || 0);
-    const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
-    return (
-      title.includes("job complete/inspected") &&
-      (done || pct >= 100)
+    const hasStrictFinal = records.some(
+      ({ r }) =>
+        /100% job complete/i.test(String(r[info.titleIdx] || "")) &&
+        Number(r[info.percentCompleteIdx] || 0) >= 100
     );
-  });
 
-  // 🚫 Skip if inspected row missing or not done
-  if (!inspectedFinalDone) {
-    console.log("🚫 [Skip Invoice] inspected final not done for job");
-    return result;
-  }
+    const hasInspectedFinal = records.some(
+      ({ r }) =>
+        /job complete\/inspected/i.test(String(r[info.titleIdx] || "")) &&
+        Number(r[info.percentCompleteIdx] || 0) >= 100
+    );
 
-  const invoiceBucket = {
-    bucket: "Jobs To Invoice",
-    reason:
-      "Inspected final complete, but invoice still 0% or partial → needs invoicing",
-    trade: null,
-    extra: null,
-  };
+    // ----------------- TRADES TO PAY -----------------
+    const unpaid = findUnpaidTrade(records, info);
+    if (unpaid) {
+      result.bucket = unpaid.bucket;
+      result.reason = unpaid.reason;
+      result.trade = unpaid.trade;
 
-  // if trade already exists, make invoice a duplicate
-  if (result.bucket) {
-    result.duplicates.push(invoiceBucket);
-  } else {
-    result.bucket = invoiceBucket.bucket;
-    result.reason = invoiceBucket.reason;
-  }
-}
-
-const finalCompleteForClose = hasStrictFinal && hasInspectedFinal;
-
-// ✅ NEW RULE:
-// Include jobs in "Jobs To Close" even if one trade is unpaid,
-// as long as invoice and finals are done.
-const unpaidTradesExist = anyUnpaidFinishedTrade(records, info);
-
-const readyForCloseEvenIfUnpaid =
-  invoiceOk &&
-  hasStrictFinal &&
-  hasInspectedFinal &&
-  unpaidTradesExist; // ← allow close even if unpaid trade exists
-
-const fullyReadyForClose =
-  invoiceOk &&
-  hasStrictFinal &&
-  hasInspectedFinal &&
-  !unpaidTradesExist;
-
-if (!result.bucket && (fullyReadyForClose || readyForCloseEvenIfUnpaid)) {
-  result.bucket = "Jobs To Close";
-  result.reason = readyForCloseEvenIfUnpaid
-    ? "Invoice and finals complete — only unpaid trade remains → move to close"
-    : "All key milestones (invoice, final, trades) are 100% → auto-close";
-  return result;
-}
-
- if (invoiceOk && !finalForClose && !result.bucket) {
-  // run lien detection before returning
-  const hasLienPhrase = txts.some(s => /lien\b/i.test(s));
-  if (hasLienPhrase) {
-    return {
-      bucket: "Liens Needed",
-      reason: "Lien phrase found (invoice complete but 100% job incomplete)",
-      trade: null,
-      extra: null,
-      duplicates: []
-    };
-  }
-
-  // no lien phrase → regular hold
-  return {
-    bucket: null,
-    reason: "Invoice completed but 100% Job Complete is not 100% → hold from closing",
-    trade: null,
-    extra: null,
-    duplicates: []
-  };
-}
-
-// 4) Final done (for invoice) AND no invoice row at all
-if (finalForInvoice && !invoicePresentFlag) {
-  const invoiceBucket = {
-    bucket: "Jobs To Invoice",
-    reason: "Final completion done but invoice row is missing",
-    trade: null,
-    extra: null,
-    duplicates: []
-  };
-
-  if (result.bucket) {
-    result.duplicates.push(invoiceBucket);
-  } else {
-    result.bucket = "Jobs To Invoice";
-    result.reason = "Final completion done but invoice row is missing";
-  }
-}
-
-// ----------------- LIEN (last in priority stack) -----------------
-const hasLienPhrase = txts.some(s => /lien\b/i.test(s));
-if (hasLienPhrase) {
-  const lienBucket = {
-    bucket: "Liens Needed",
-    reason: "Lien phrase found",
-    trade: null,
-    extra: null,
-    duplicates: []
-  };
-
-  if (result.bucket) {
-    result.duplicates.push(lienBucket);
-  } else {
-    result.bucket = "Liens Needed";
-    result.reason = "Lien phrase found";
-  }
-}
-
-    // If nothin above has classified it, but we see "invoice" text somewhere,
-    // only treat it as Jobs To Invoice if SOMETHING is actually done (100% or Completed=TRUE).
-    if (!result.bucket && txts.some(s => s.includes("invoice") || s.includes("invoiced"))) {
-      const anyDone = jobHasAnyDoneRow(records, info);
-
-      if (!anyDone) {
-        // 🔒 Guard: do NOT show in Jobs To Invoice if nothing is 100% / done
-        return {
-          bucket: null,
-          reason: "Invoice phrase present but no rows at 100% or marked complete → not ready to invoice",
+      if (invoiceOk && hasStrictFinal) {
+        result.duplicates.push({
+          bucket: "Jobs To Close",
+          reason:
+            "Invoice & 100% Job Complete done — only unpaid trade remains → ready to close",
           trade: null,
-          extra: null,
-          duplicates: []
-        };
+          extra: null
+        });
       }
-
-      // ✅ At least one row is done → this is a real “Jobs To Invoice” candidate
-      return {
-        bucket: "Jobs To Invoice",
-        reason: "Invoice phrase found",
-        trade: null,
-        extra: null,
-        duplicates: []
-      };
     }
 
-    // ----------------- TRADES-ONLY CASE (no close/invoice conditions hit) -----------------
+    // ----------------- INVOICE BUCKET -----------------
+    let inspectedFinalDone = false;
+    if (!invoiceOk) {
+      inspectedFinalDone = records.some(({ r }) => {
+        const title = String(r[info.titleIdx] || "").toLowerCase();
+        const pct = Number(r[info.percentCompleteIdx] || 0);
+        const done =
+          info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+        return title.includes("job complete/inspected") && (done || pct >= 100);
+      });
 
-    if (result.bucket) {
-console.log("🏁 Final decision object:", JSON.stringify(result, null, 2));
-console.groupEnd();
-      return result;
+      // ✅ don't return early; just skip creating invoice bucket if not ready
+      if (inspectedFinalDone) {
+        const invoiceBucket = {
+          bucket: "Jobs To Invoice",
+          reason:
+            "Inspected final complete, but invoice still 0% or partial → needs invoicing",
+          trade: null,
+          extra: null
+        };
+
+        if (result.bucket) result.duplicates.push(invoiceBucket);
+        else {
+          result.bucket = invoiceBucket.bucket;
+          result.reason = invoiceBucket.reason;
+        }
+      }
     }
-// ✅ If a trade bucket exists (To Pay) and the job is fully invoiced + both finals done,
-// also add Jobs To Close as a duplicate.
-if (
-  result.bucket &&
-  result.bucket.endsWith("To Pay") &&
-  invoiceOk &&
-  hasStrictFinal &&
-  hasInspectedFinal
-) {
-  result.duplicates.push({
-    bucket: "Jobs To Close",
-    reason: "Trade finished unpaid but all finals + invoice done → ready to close as well",
-    trade: null,
-    extra: null
+
+    // ----------------- CLOSE BUCKET -----------------
+    const unpaidTradesExist = anyUnpaidFinishedTrade(records, info);
+
+    // 🧩 Detect lien rows that are incomplete (FALSE or <100%)
+    const lienIncomplete = records.some(({ r }) => {
+      const title = String(r[info.titleIdx] || "").toLowerCase();
+      const done =
+        info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+      return title.includes("lien") && !done;
+    });
+
+    // ✅ Only mark ready for close if lien is fully complete
+    const fullyReadyForClose =
+      invoiceOk &&
+      hasStrictFinal &&
+      hasInspectedFinal &&
+      !unpaidTradesExist &&
+      !lienIncomplete;
+
+    const readyForCloseEvenIfUnpaid =
+      invoiceOk &&
+      hasStrictFinal &&
+      hasInspectedFinal &&
+      unpaidTradesExist &&
+      !lienIncomplete;
+
+    if (!result.bucket && (fullyReadyForClose || readyForCloseEvenIfUnpaid)) {
+      result.bucket = "Jobs To Close";
+      result.reason = readyForCloseEvenIfUnpaid
+        ? "Invoice and finals complete — only unpaid trade remains → move to close"
+        : "All key milestones (invoice, final, trades, lien) are 100% → auto-close";
+    }
+
+    // ----------------- LIEN (last in priority stack) -----------------
+    const lienRow = records.find(({ r }) => {
+      const title = String(r[info.titleIdx] || "").toLowerCase();
+      const phase =
+        info.phaseIdx >= 0
+          ? String(r[info.phaseIdx] || "").toLowerCase()
+          : "";
+      return title.includes("lien") || phase.includes("lien");
+    });
+
+    if (lienRow) {
+  const rawPct  = info.percentCompleteIdx >= 0 ? lienRow.r[info.percentCompleteIdx] : undefined;
+  const rawDone = info.completedIdx      >= 0 ? lienRow.r[info.completedIdx]      : undefined;
+
+  const pct  = info.percentCompleteIdx >= 0 ? numberish(rawPct) : 0;
+  const done = info.completedIdx      >= 0 ? isTruthy(rawDone)  : false;
+
+  console.log("🧪 Lien raw cells for", job, {
+    rawPct, rawDone, coerced: { pct, done, types: { rawPct: typeof rawPct, rawDone: typeof rawDone } }
   });
-}
 
-    // ----------------- NOTHING MATCHED -----------------
-    return {
-      bucket: null,
-      reason: "No matching rule",
-      trade: null,
-      extra: null,
-      duplicates: []
-    };
+      console.log("⚙️ Checking lien logic for", job, "| done =", done, "| pct =", pct);
+
+      if (!done || pct < 100) {
+        console.log("🚨 Lien incomplete — marking Liens Needed for", job);
+
+        if (!result.bucket) {
+          result.bucket = "Liens Needed";
+          result.reason = "Lien record incomplete — cannot close job";
+        } else if (!result.duplicates.some(d => d.bucket === "Liens Needed")) {
+          result.duplicates.push({
+            bucket: "Liens Needed",
+            reason: "Lien record incomplete — cannot close job",
+            trade: null,
+            extra: null
+          });
+        }
+
+        // prevent Jobs To Close if lien incomplete
+        if (result.bucket === "Jobs To Close") {
+          result.bucket = null;
+          result.reason = "Lien incomplete — cannot close job";
+        }
+      }
+    }
+
+    // ----------------- RETURN RESULT -----------------
+    return result;
   } catch (e) {
     log(e?.message || String(e), "err");
     return {
@@ -762,6 +599,8 @@ if (
   }
 }
 
+
+   
 
 
 function reEscape(s){ return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
@@ -901,12 +740,15 @@ $file.addEventListener('change', async ()=>{
       try{
         const u8 = new Uint8Array(await f.arrayBuffer());
         const wb = XLSX.read(u8, { type:'array' });
-        const sheetName = (wb.SheetNames||[]).find(n=>n.toLowerCase()==="schedules") || wb.SheetNames[0];
+// Always read from the sheet named "Schedules"
+const sheetName = "Schedules";
         const ws = wb.Sheets[sheetName];
         const aoa = XLSX.utils.sheet_to_json(ws, { header:1, defval:"" });
 
-        const pick = chooseHeaderRowWithFallback(aoa, 10);
-        const headers = aoa[pick.index] || [];
+     // Force header row to be the first row (index 0)
+const pick = { index: 0, reason: "Row 1 forced as header row" };
+const headers = aoa[0] || [];
+
 
         vlog(`File: ${f.name} | Sheet: ${sheetName}`, "ok");
         dumpRow(`Row 1 (peek ${f.name})`, aoa[0]||[], 17);
@@ -1009,52 +851,19 @@ window.info = info;
       jobGroups.set(jobKey, list);
     });
 
-    log(`Grouped into ${jobGroups.size} unique jobs.`, "ok");
+       log(`Grouped into ${jobGroups.size} unique jobs.`, "ok");
 
-    // === Async classification: handle jobs in chunks so browser doesn't freeze ===
-    const entries = Array.from(jobGroups.entries());
-    const totalJobs = entries.length;
-const assignment = new Map();
-window.assignment = assignment;
+    // 🧩 Run classification once (fills window.assignment + window.allRecords)
+    const allJobs = Object.fromEntries(jobGroups.entries());
+    classifyAllJobs(allJobs, info);
+    finishCompute();
 
-const close = [];
-window.close = close; // lets you type `close` in console
+    // Optional: show summary in UI
+    $summary.textContent = `✅ Classified ${window.assignment.size} jobs total.`;
 
-let index = 0;
-const BATCH_SIZE = 40;
-const FRAME_BUDGET = 12;
-
-    $summary.textContent = `Classifying ${totalJobs} jobs...`;
-  function classifyBatch() {
-      const start = performance.now();
-      let processed = 0;
-
-      while (
-        index < totalJobs &&
-        processed < BATCH_SIZE &&
-        performance.now() - start < FRAME_BUDGET
-      ) {
-        const [jobKey, records] = entries[index++];
-        const displayJobName = records[0]?.rawJob || "";
-        const pick = classifyJob(displayJobName, records, info);
-        assignment.set(jobKey, pick);
-        if (pick.bucket === "Jobs To Close") close.push(displayJobName);
-
-        processed++;
-      }
-
-      $summary.textContent = `Classifying jobs... ${index}/${totalJobs}`;
-
-      if (index < totalJobs) {
-        requestAnimationFrame(classifyBatch);
-      } else {
-        finishCompute(allRows, info, jobGroups, assignment, combinedStatus);
-      }
-    }
-
-    // Start classification
-    requestAnimationFrame(classifyBatch);
-
+    // Log for confirmation
+    console.log("🧾 window.allRecords size:", window.allRecords.size);
+    console.log("🧱 window.assignment size:", window.assignment.size);
   } catch (e) {
     log(e?.message || String(e), "err");
   }
@@ -1063,87 +872,140 @@ const FRAME_BUDGET = 12;
 // ---------------- CLASSIFY JOB ----------------
 function classifyJob(job, records, info) {
   try {
-    // Call the decision helper
+    // Call decision helper to determine bucket(s)
     const result = decideForJob(job, records, info);
 
-    // Ensure consistent structure
+    // Ensure consistent return structure
     if (!result || typeof result !== "object") {
-      return { bucket: null, reason: "Invalid decision result", trade: null, duplicates: [] };
+      return {
+        bucket: null,
+        reason: "Invalid decision result",
+        trade: null,
+        duplicates: []
+      };
     }
 
-    // Guarantee duplicates array
+    // Guarantee duplicates is always an array
     if (!Array.isArray(result.duplicates)) result.duplicates = [];
 
     return result;
+
   } catch (err) {
     console.error("classifyJob error for", job, err);
-    return { bucket: null, reason: `Error: ${err.message}`, trade: null, duplicates: [] };
+    return {
+      bucket: null,
+      reason: `Error: ${err.message}`,
+      trade: null,
+      duplicates: []
+    };
   }
 }
 
-function finishCompute(allRows, info, jobGroups, assignment, combinedStatus) {
-  const columns = [];
-const jobsToClose = [];
-window.jobsToClose = jobsToClose;   // 👈 expose globally for console access
+function classifyAllJobs(allJobs, info) {
+  try {
+    // Create global maps for debugging and results
+    window.assignment = new Map();    // Holds final bucket results
+    window.allRecords = new Map();    // Holds raw job rows for debugging
 
-  // ✅ Declare these FIRST so they can be safely used below
-  const invoice = [];
-  const close = [];
-  const lien = [];
+    console.log("🔧 Starting classification...");
 
-function allBucketsForDecision(decision) {
-  const arr = [];
-  if (decision.bucket) arr.push(decision.bucket);
-  if (Array.isArray(decision.duplicates)) {
-    for (const dup of decision.duplicates) {
-      if (dup && dup.bucket) arr.push(dup.bucket);
+    // Loop through all jobs and classify them
+    for (const [job, records] of Object.entries(allJobs)) {
+      window.allRecords.set(job, records);
+
+      const result = classifyJob(job, records, info);
+      window.assignment.set(job, result);
     }
+
+    console.log("✅ Classification complete!");
+    console.log(`✅ Classified ${window.assignment.size} jobs`);
+
+    return window.assignment;
+
+  } catch (err) {
+    console.error("❌ classifyAllJobs failed:", err);
+    return new Map();
   }
-  return arr;
 }
 
 
-  // 🧩 Per-trade buckets
-  for (const trade of TRADES) {
-    if (IGNORED_TRADES.has(String(trade).toLowerCase())) continue;
-    const items = [];
+function finishCompute() {
+  try {
+    // ✅ Use the global Map we filled earlier
+    const entries = Array.from(window.assignment?.entries?.() || []);
+    if (!entries.length) {
+      console.warn("⚠️ No jobs to render — window.assignment is empty or undefined.");
+      return;
+    }
 
-    for (const [job, decision] of assignment.entries()) {
-      const allB = allBucketsForDecision(decision);
-      if (allB.some(b => String(b || "").includes(`${trade} To Pay`))) {
-        items.push(job);
+    const columns = [];
+    const jobsToClose = [];
+    window.jobsToClose = jobsToClose; // 👈 expose globally for console access
+
+    // ✅ Declare these FIRST so they can be safely used below
+    const invoice = [];
+    const close = [];
+    const lien = [];
+
+    function allBucketsForDecision(decision) {
+      const arr = [];
+      if (decision.bucket) arr.push(decision.bucket);
+      if (Array.isArray(decision.duplicates)) {
+        for (const dup of decision.duplicates) {
+          if (dup && dup.bucket) arr.push(dup.bucket);
+        }
       }
+      return arr;
     }
 
-    if (items.length) items.sort(compareJobsByStreet);
-    columns.push({ header: `${trade} To Pay`, items });
+    // 🧩 Per-trade buckets
+    for (const trade of TRADES) {
+      if (IGNORED_TRADES.has(String(trade).toLowerCase())) continue;
+      const items = [];
+
+      // ✅ FIX: use window.assignment here
+      for (const [job, decision] of window.assignment.entries()) {
+        const allB = allBucketsForDecision(decision);
+        if (allB.some(b => String(b || "").includes(`${trade} To Pay`))) {
+          items.push(job);
+        }
+      }
+
+      if (items.length) items.sort(compareJobsByStreet);
+      columns.push({ header: `${trade} To Pay`, items });
+    }
+
+    // 🧾 Global buckets
+    // ✅ FIX: use window.assignment here too
+    for (const [job, decision] of window.assignment.entries()) {
+      const allB = allBucketsForDecision(decision);
+      if (allB.some(b => String(b || "").includes("Jobs To Invoice"))) invoice.push(job);
+      if (allB.some(b => String(b || "").includes("Jobs To Close")))   close.push(job);
+      if (allB.some(b => String(b || "").includes("Liens Needed")))    lien.push(job);
+    }
+
+    // ✅ Safe to sort now
+    invoice.sort(compareJobsByStreet);
+    close.sort(compareJobsByStreet);
+    lien.sort(compareJobsByStreet);
+
+    // ✅ Add to columns
+    columns.push({ header: "Jobs To Invoice", items: invoice });
+    columns.push({ header: "Jobs To Close",   items: close });
+    columns.push({ header: "Liens Needed",    items: lien });
+
+    // 🪟 Render everything
+    renderColumns(columns);
+    const aoaOut = buildAOA(columns);
+
+    // 🔍 Debugging: expose and inspect buckets
+    window.allBuckets = Object.fromEntries(columns.map(c => [c.header, c.items]));
+    console.log("📦 All bucket headers:", Object.keys(window.allBuckets));
+    console.log("🧩 Siding bucket contents:", window.allBuckets["Siding To Pay"]);
+  } catch (err) {
+    console.error("❌ finishCompute failed:", err);
   }
 
-  // 🧾 Global buckets
-  for (const [job, decision] of assignment.entries()) {
-    const allB = allBucketsForDecision(decision);
-    if (allB.some(b => String(b || "").includes("Jobs To Invoice"))) invoice.push(job);
-    if (allB.some(b => String(b || "").includes("Jobs To Close")))   close.push(job);
-    if (allB.some(b => String(b || "").includes("Liens Needed")))    lien.push(job);
-  }
-
-  // ✅ Safe to sort now
-  invoice.sort(compareJobsByStreet);
-  close.sort(compareJobsByStreet);
-  lien.sort(compareJobsByStreet);
-
-  // ✅ Add to columns
-  columns.push({ header: "Jobs To Invoice", items: invoice });
-  columns.push({ header: "Jobs To Close",   items: close });
-  columns.push({ header: "Liens Needed",    items: lien });
-
-  // 🪟 Render everything
-  renderColumns(columns);
-  const aoaOut = buildAOA(columns);
-// 🔍 Debugging: expose and inspect buckets
-window.allBuckets = Object.fromEntries(columns.map(c => [c.header, c.items]));
-console.log("📦 All bucket headers:", Object.keys(window.allBuckets));
-console.log("🧩 Siding bucket contents:", window.allBuckets["Siding To Pay"]);
 
   // 📥 Setup CSV download
   $download.onclick = () => {
@@ -1231,10 +1093,7 @@ console.log("🧩 Siding bucket contents:", window.allBuckets["Siding To Pay"]);
 
 /* ----------------- Explain panel ----------- */
 $inspectBtn.addEventListener('click', () => {
-  if (!state) {
-    $inspectOut.textContent = "Run Compute first.";
-    return;
-  }
+ 
 
   const targets = $inspectInput.value
     .split(/\r?\n/)
@@ -1246,7 +1105,9 @@ $inspectBtn.addEventListener('click', () => {
     return;
   }
 
-  const { jobGroups, assignment, info } = state;
+const jobGroups = window.jobGroups || state?.jobGroups;
+const assignment = window.assignment || state?.assignment;
+const info = window.info || state?.info;
   const lines = [];
 
 lines.push("Explain (priority = Trades → Invoice → Close → Lien)");
@@ -1339,41 +1200,59 @@ let anyLien = false;
   return "Invoice: ❌"; // present but not 100% still red ❌
 })();
 
-    let finalLine = "";
-    if (finalDone) {
-      finalLine = "✅ final done";
-    } else if (finalPending) {
-      finalLine = "🟡 final present but not done";
-    } else {
-      finalLine = "❌ no final row";
-    }
+     let finalLine = "";
+  if (finalDone) {
+    finalLine = "✅ final done";
+  } else if (finalPending) {
+    finalLine = "🟡 final present but not done";
+  } else {
+    finalLine = "❌ no final row";
+  }
 
-    const tradesLine = tradesToPay.length
-      ? `⛔ trades needing payment: ${tradesToPay.join(", ")}`
-      : "no trades needing payment";
+  const tradesLine = tradesToPay.length
+    ? `⛔ trades needing payment: ${tradesToPay.join(", ")}`
+    : "no trades needing payment";
 
-    const lienLine = anyLien ? "Lien phrase detected (PHRASES_LIEN match)" : "no lien phrase detected";
+  // --- UPDATED lien detection synced with decideForJob() ---
+  const lienRow = recs.find(({ r }) => {
+    const title = String(r[info.titleIdx] || "").toLowerCase();
+    const phase = info.phaseIdx >= 0 ? String(r[info.phaseIdx] || "").toLowerCase() : "";
+    return title.includes("lien") || phase.includes("lien");
+  });
 
-lines.push("  Status snapshot:");
-lines.push(`    • ${invoiceStatusText}`);
-    lines.push(`    • Final (100% / inspected): ${finalLine}`);
-    lines.push(`    • Trades: ${tradesLine}`);
-    lines.push(`    • Liens: ${lienLine}`);
+  let lienLine;
+  if (lienRow) {
+    const pct = info.percentCompleteIdx >= 0 ? numberish(lienRow.r[info.percentCompleteIdx]) : 0;
+    const done = info.completedIdx >= 0 ? isTruthy(lienRow.r[info.completedIdx]) : false;
+    lienLine = (!done || pct < 100)
+      ? `⛔ incomplete (done=${!!done}, %=${Number(pct) || 0})`
+      : "✅ complete";
+  } else {
+    lienLine = "no lien row found";
+  }
 
-    // Debug aliases
-    lines.push("  Debug Aliases:");
-    for (const [alias, terms] of Object.entries(ALIAS_GROUPS)) {
-      lines.push(`    ${alias} → ${terms.join(", ")}`);
-    }
+  // ----- OUTPUT SECTION -----
+  lines.push("  Status snapshot:");
+  lines.push(`    • ${invoiceStatusText}`);
+  lines.push(`    • Final (100% / inspected): ${finalLine}`);
+  lines.push(`    • Trades: ${tradesLine}`);
+  lines.push(`    • Liens: ${lienLine}`);
 
-    // Invoiced row count
-    const invoicedRows = recs.filter(({ r }) => {
-      const val = info.titleIdx >= 0 ? String(r[info.titleIdx]).toLowerCase() : "";
-      return val.includes("invoiced");
-    });
-    if (invoicedRows.length) {
-      lines.push(`  📄 Invoiced rows: ${invoicedRows.length}`);
-    }
+  // Debug aliases
+  lines.push("  Debug Aliases:");
+  for (const [alias, terms] of Object.entries(ALIAS_GROUPS)) {
+    lines.push(`    ${alias} → ${terms.join(", ")}`);
+  }
+
+  // Invoiced row count
+  const invoicedRows = recs.filter(({ r }) => {
+    const val = info.titleIdx >= 0 ? String(r[info.titleIdx]).toLowerCase() : "";
+    return val.includes("invoiced");
+  });
+  if (invoicedRows.length) {
+    lines.push(`  📄 Invoiced rows: ${invoicedRows.length}`);
+  }
+
 
     // Key rows
     lines.push("  Key rows:");
