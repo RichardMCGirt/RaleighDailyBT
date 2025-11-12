@@ -540,50 +540,42 @@ function decideForJob(job, records, info) {
     }
 
     // ----------------- LIEN (last in priority stack) -----------------
-    const lienRow = records.find(({ r }) => {
-      const title = String(r[info.titleIdx] || "").toLowerCase();
-      const phase =
-        info.phaseIdx >= 0
-          ? String(r[info.phaseIdx] || "").toLowerCase()
-          : "";
-      return title.includes("lien") || phase.includes("lien");
-    });
+ // ----------------- LIEN (last in priority stack) -----------------
+const lienRow = records.find(({ r }) => {
+  const title = String(r[info.titleIdx] || "").toLowerCase();
+  const phase = info.phaseIdx >= 0 ? String(r[info.phaseIdx] || "").toLowerCase() : "";
+  return title.includes("lien") || phase.includes("lien");
+});
 
-    if (lienRow) {
-  const rawPct  = info.percentCompleteIdx >= 0 ? lienRow.r[info.percentCompleteIdx] : undefined;
-  const rawDone = info.completedIdx      >= 0 ? lienRow.r[info.completedIdx]      : undefined;
+if (lienRow) {
+  const rawPct = lienRow.r[info.percentCompleteIdx];
+  const rawDone = lienRow.r[info.completedIdx];
+  const pct = numberish(rawPct);
+  const done = isTruthy(rawDone);
 
-  const pct  = info.percentCompleteIdx >= 0 ? numberish(rawPct) : 0;
-  const done = info.completedIdx      >= 0 ? isTruthy(rawDone)  : false;
+  // ✅ check liens when invoice & finals are complete (even if trades unpaid)
+const closeReady = invoiceOk && (hasStrictFinal || hasInspectedFinal);
+  console.log("⚙️ Checking lien logic for", job, "| done =", done, "| pct =", pct, "| closeReady =", closeReady);
 
-  console.log("🧪 Lien raw cells for", job, {
-    rawPct, rawDone, coerced: { pct, done, types: { rawPct: typeof rawPct, rawDone: typeof rawDone } }
-  });
+  if (closeReady && (!done || pct < 100)) {
+    console.log("🚨 Lien incomplete — marking Liens Needed for", job);
 
-      console.log("⚙️ Checking lien logic for", job, "| done =", done, "| pct =", pct);
-
-      if (!done || pct < 100) {
-        console.log("🚨 Lien incomplete — marking Liens Needed for", job);
-
-        if (!result.bucket) {
-          result.bucket = "Liens Needed";
-          result.reason = "Lien record incomplete — cannot close job";
-        } else if (!result.duplicates.some(d => d.bucket === "Liens Needed")) {
-          result.duplicates.push({
-            bucket: "Liens Needed",
-            reason: "Lien record incomplete — cannot close job",
-            trade: null,
-            extra: null
-          });
-        }
-
-        // prevent Jobs To Close if lien incomplete
-        if (result.bucket === "Jobs To Close") {
-          result.bucket = null;
-          result.reason = "Lien incomplete — cannot close job";
-        }
-      }
+    // 🪶 Lien takes precedence only if no other bucket or job-to-close
+    if (!result.bucket || result.bucket === "Jobs To Close") {
+      result.bucket = "Liens Needed";
+      result.reason = "Lien record incomplete — cannot close job";
+    } else if (!result.duplicates.some(d => d.bucket === "Liens Needed")) {
+      // Add as duplicate if some other trade bucket already exists
+      result.duplicates.push({
+        bucket: "Liens Needed",
+        reason: "Lien record incomplete — cannot close job",
+        trade: null,
+        extra: null
+      });
     }
+  }
+}
+
 
     // ----------------- RETURN RESULT -----------------
     return result;
