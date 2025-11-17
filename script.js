@@ -212,24 +212,24 @@ function hasTradeWorkComplete(trade, records, info, tokens){
 
 function findUnpaidTrade(records, info) {
   const rows = records.map(({ r }) => ({ r, s: textOf(r, info) }));
-  const closeOutDone = hasAnyCloseOutComplete(records, info);
-  const closeOutSoft = hasAnyCloseOutSoft(records, info);
+  const unpaidTrades = [];   // ⭐ collect multiple unpaid trades
 
   for (const prettyLabel of TRADES) {
     const tradeKey = prettyLabel.toLowerCase();
     if (IGNORED_TRADES.has(tradeKey)) continue;
 
     const tokens = tokensFor(prettyLabel);
-    const tradeComplete = hasTradeCompleteSignal(prettyLabel, records, info);
-    const paidRows = rows.filter(x => x.s.includes("paid") && tokens.some(t => x.s.includes(t)));
+    const paidRows = rows.filter(
+      x => x.s.includes("paid") && tokens.some(t => x.s.includes(t))
+    );
+
     const anyPaidPending = paidRows.some(x => !rowIsCompleted(x.r, info));
     const anyPaidDone    = paidRows.some(x =>  rowIsCompleted(x.r, info));
-    const requireTradeComplete = STRICT_COMPLETION_TRADES.has(tradeKey);
+
+    const tradeComplete = hasTradeCompleteSignal(prettyLabel, records, info);
 
     // ---------- SIDING special case ----------
     if (tradeKey === "siding") {
-      const jobName = records[0]?.r?.[info.keyIdx] || "(unknown job)";
-
       const inspectedFinalDone = records.some(({ r }) => {
         const title = String(r[info.titleIdx] || "").toLowerCase();
         const pct   = Number(r[info.percentCompleteIdx] || 0);
@@ -237,48 +237,33 @@ function findUnpaidTrade(records, info) {
         return title.includes("job complete/inspected") && (done || pct >= 100);
       });
 
-      const inspectedFinalPresent = records.some(({ r }) => {
-        const title = String(r[info.titleIdx] || "").toLowerCase();
-        return title.includes("job complete/inspected");
-      });
-
-   
-
+      // siding unpaid AND final complete
       if (anyPaidPending && !anyPaidDone && inspectedFinalDone) {
-        return {
+        unpaidTrades.push({
           trade: tradeKey,
           bucket: `${prettyLabel} To Pay`,
           reason: `${prettyLabel} unpaid but job inspected complete`,
-        };
+        });
       }
 
-      if (anyPaidPending && !anyPaidDone && inspectedFinalPresent && !inspectedFinalDone) {
-        continue;
-      }
+      continue;
     }
 
-    // ---------- GENERAL FALLBACK for other trades ----------
-    // For trades like Columns, Porch, etc.
-  // ---------- GENERAL FALLBACK for other trades ----------
-if (anyPaidPending && !anyPaidDone) {
-  const jobName = records[0]?.r?.[info.keyIdx] || "(unknown job)";
-  const tradeReallyComplete = hasTradeCompleteSignal(prettyLabel, records, info);
-
-  // 🧠 Require trade to actually be complete (TRUE or % ≥ 100)
-  if (tradeReallyComplete) {
-    return {
-      trade: tradeKey,
-      bucket: `${prettyLabel} To Pay`,
-      reason: `${prettyLabel} unpaid but trade complete`,
-    };
-  } else {
-  }
-}
-
+    // ---------- GENERAL TRADES ----------
+    if (anyPaidPending && !anyPaidDone && tradeComplete) {
+      unpaidTrades.push({
+        trade: tradeKey,
+        bucket: `${prettyLabel} To Pay`,
+        reason: `${prettyLabel} unpaid but trade complete`,
+      });
+    }
   }
 
-  return null;
+  // ⭐ Return ALL unpaid trades, not just 1
+  return unpaidTrades.length > 0 ? unpaidTrades : null;
 }
+
+
 
 
 const READY_INVOICE_MODE = "strict";
@@ -460,22 +445,36 @@ function decideForJob(job, records, info) {
     );
 
     // ----------------- TRADES TO PAY -----------------
-    const unpaid = findUnpaidTrade(records, info);
-    if (unpaid) {
-      result.bucket = unpaid.bucket;
-      result.reason = unpaid.reason;
-      result.trade = unpaid.trade;
+   const unpaidList = findUnpaidTrade(records, info);
 
-      if (invoiceOk && hasStrictFinal) {
-        result.duplicates.push({
-          bucket: "Jobs To Close",
-          reason:
-            "Invoice & 100% Job Complete done — only unpaid trade remains → ready to close",
-          trade: null,
-          extra: null
-        });
-      }
-    }
+if (Array.isArray(unpaidList) && unpaidList.length > 0) {
+  // First unpaid trade becomes main bucket
+  result.bucket = unpaidList[0].bucket;
+  result.reason = unpaidList[0].reason;
+  result.trade  = unpaidList[0].trade;
+
+  // The rest become duplicates
+  for (let i = 1; i < unpaidList.length; i++) {
+    result.duplicates.push({
+      bucket: unpaidList[i].bucket,
+      reason: unpaidList[i].reason,
+      trade: unpaidList[i].trade,
+      extra: null
+    });
+  }
+
+  // Keep your existing "ready to close"
+  if (invoiceOk && hasStrictFinal) {
+    result.duplicates.push({
+      bucket: "Jobs To Close",
+      reason:
+        "Invoice & 100% Job Complete done — only unpaid trade remains → ready to close",
+      trade: null,
+      extra: null
+    });
+  }
+}
+
 
     // ----------------- INVOICE BUCKET -----------------
     let inspectedFinalDone = false;
@@ -1600,13 +1599,13 @@ const ALIASES = {
 function getTradesToPay(records, info) {
   const trades = [];
 
-  // ---------- 1️⃣ Check if there is any explicit trade completion row ----------
+  // ---------- 1️⃣ Detect Columns Complete ----------
   const hasColumnCompleteRow = records.some(({ r }) => {
     const title = safeCell(r[info.titleIdx]).toLowerCase();
     return /columns?\s+complete/.test(title);
   });
 
-  // ---------- 2️⃣ Trade-specific completion (TRUE/100%) ----------
+  // TRUE if Completed = TRUE OR %>=100
   const colFinished =
     info.columnsCompleteIdx >= 0
       ? records.some(({ r }) => isTruthy(r[info.columnsCompleteIdx]))
@@ -1617,44 +1616,44 @@ function getTradesToPay(records, info) {
           return /columns?\s+complete/.test(title) && (done || pct >= 100);
         });
 
-  // ---------- 3️⃣ Global final fallback ----------
+  // ---------- 2️⃣ Global final fallback ----------
   const globalFinalDone = records.some(({ r }) => {
     const title = safeCell(r[info.titleIdx]).toLowerCase();
     const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
     const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+
     return (
       (title.includes("job complete/inspected") || title.includes("100% job complete")) &&
       (done || pct >= 100)
     );
   });
 
-  // ✅ NEW RULE:
-  // - If we found a specific Column Complete row → use its completion state directly.
-  // - If there is no Column Complete row at all → fall back to global final done.
+  // If we have a specific Columns Complete row → trust that
+  // Otherwise fall back to global final row for “finished”
   const effectiveFinished = hasColumnCompleteRow ? colFinished : globalFinalDone;
 
-  // ---------- 4️⃣ Paid / sub checks ----------
-  const colPaid = anyDoneByTitle(records, info, ALIASES.columns.paid);
 
-  const hasSubInvolved = records.some(({ r }) => {
-    const t = safeCell(r[info.titleIdx]).toLowerCase();
-    return t.includes("paid siding sub") || t.includes("subcontractor");
+  // ---------- 3️⃣ NEW: Correct Paid detection (fixes your bug) ----------
+  // A trade is counted as paid ONLY IF Completed=TRUE OR Pct>=100
+  const colPaid = records.some(({ r }) => {
+    const title = safeCell(r[info.titleIdx]).toLowerCase();
+    if (!title.includes("paid") || !title.includes("column")) return false;
+
+    const done = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+    const pct  = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+
+    // Paid must be TRUE (Completed=TRUE or %>=100)
+    return done || pct >= 100;
   });
 
-  // ---------- 5️⃣ Apply trade logic ----------
-if (effectiveFinished && !colPaid) {
-  trades.push("Columns");
-}
-
-
-  // Defensive: remove if any paid row exists
-  if (colPaid) {
-    const idx = trades.indexOf("Columns");
-    if (idx >= 0) trades.splice(idx, 1);
+  // ---------- 4️⃣ Apply Columns To Pay rule ----------
+  if (effectiveFinished && !colPaid) {
+    trades.push("Columns");
   }
 
   return trades;
 }
+
 
 
 
