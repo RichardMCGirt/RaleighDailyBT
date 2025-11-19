@@ -95,7 +95,7 @@ function hasFinalDone(records, info) {
 /* ----------------- DOM -------------------- */
 const $file = document.getElementById('fileInput');
 const $run = document.getElementById('runBtn');
-const $download = document.getElementById('downloadBtn');
+const $downloadBtn = document.getElementById("downloadBtn");
 const $countBadge = document.getElementById('countBadge');
 const $summary = document.getElementById('summary');
 const $grid = document.getElementById('grid');
@@ -999,7 +999,7 @@ function classifyAllJobs(allJobs, info) {
 
 function finishCompute() {
   try {
-    // ✅ Use the global Map we filled earlier
+    // Get assignment entries
     const entries = Array.from(window.assignment?.entries?.() || []);
     if (!entries.length) {
       console.warn("⚠️ No jobs to render — window.assignment is empty or undefined.");
@@ -1008,19 +1008,86 @@ function finishCompute() {
 
     const columns = [];
     const jobsToClose = [];
-    window.jobsToClose = jobsToClose; // 👈 expose globally for console access
+    window.jobsToClose = jobsToClose;
 
-    // ✅ Declare these FIRST so they can be safely used below
     const invoice = [];
     const close = [];
     const lien = [];
-// =======================================================
-// 🔧 Build Export AOA (Array Of Arrays) for Excel Export
-// =======================================================
-// =======================================================
-// 🌟 Global Export Builder — Works for CSV & Excel
-// =======================================================
-function buildAoaExport() {
+
+    function allBucketsForDecision(decision) {
+      const arr = [];
+      if (decision.bucket) arr.push(decision.bucket);
+      if (Array.isArray(decision.duplicates)) {
+        for (const dup of decision.duplicates) {
+          if (dup && dup.bucket) arr.push(dup.bucket);
+        }
+      }
+      return arr;
+    }
+
+    // Per-trade buckets
+    for (const trade of TRADES) {
+      if (IGNORED_TRADES.has(String(trade).toLowerCase())) continue;
+
+      const items = [];
+
+      for (const [job, decision] of window.assignment.entries()) {
+        const allB = allBucketsForDecision(decision);
+        if (allB.some(b => String(b || "").includes(`${trade} To Pay`))) {
+          items.push(job);
+        }
+      }
+
+      if (items.length) items.sort(compareJobsByStreet);
+      columns.push({ header: `${trade} To Pay`, items });
+    }
+
+    // Global buckets
+    for (const [job, decision] of window.assignment.entries()) {
+      const allB = allBucketsForDecision(decision);
+
+      if (allB.some(b => String(b || "").includes("Jobs To Invoice"))) invoice.push(job);
+      if (allB.some(b => String(b || "").includes("Jobs To Close")))   close.push(job);
+      if (allB.some(b => String(b || "").includes("Liens Needed")))    lien.push(job);
+    }
+
+    invoice.sort(compareJobsByStreet);
+    close.sort(compareJobsByStreet);
+    lien.sort(compareJobsByStreet);
+
+    columns.push({ header: "Jobs To Invoice", items: invoice });
+    columns.push({ header: "Jobs To Close",   items: close });
+    columns.push({ header: "Liens Needed",    items: lien });
+
+    // Render
+    renderColumns(columns);
+
+    // 🌟 BUILD STATE *INSIDE THE TRY BLOCK*
+    state = {
+      rows: window.allRows || [],
+      info: window.info || {},
+      jobGroups: Object.fromEntries(window.jobGroups?.entries?.() || []),
+      assignment: Object.fromEntries(window.assignment?.entries?.() || []),
+      combinedStatus: combinedStatus || null,
+      columns // ⭐ this now exists
+    };
+
+    // Enable download
+    $downloadBtn.disabled = false;
+    $downloadBtn.onclick = () => {
+      const aoa = buildAOA(state.columns);
+      const location = document.getElementById("locationSelect")?.value || "Unknown";
+      const date = new Date().toISOString().split("T")[0];
+      downloadAOA(aoa, `${location}_Jobs_${date}.csv`);
+    };
+
+  } catch (err) {
+    console.error("❌ finishCompute failed:", err);
+  }
+}
+
+
+function buildAoa() {
     if (!state || !state.jobGroups) {
         console.error("❌ No state available to export");
         return [["Error: No data"]];
@@ -1059,100 +1126,10 @@ function buildAoaExport() {
 }
 
 
-
-
-
-
-    function allBucketsForDecision(decision) {
-      const arr = [];
-      if (decision.bucket) arr.push(decision.bucket);
-      if (Array.isArray(decision.duplicates)) {
-        for (const dup of decision.duplicates) {
-          if (dup && dup.bucket) arr.push(dup.bucket);
-        }
-      }
-      return arr;
-    }
-
-    // 🧩 Per-trade buckets
-    for (const trade of TRADES) {
-      if (IGNORED_TRADES.has(String(trade).toLowerCase())) continue;
-      const items = [];
-
-      // ✅ FIX: use window.assignment here
-      for (const [job, decision] of window.assignment.entries()) {
-        const allB = allBucketsForDecision(decision);
-        if (allB.some(b => String(b || "").includes(`${trade} To Pay`))) {
-          items.push(job);
-        }
-      }
-
-      if (items.length) items.sort(compareJobsByStreet);
-      columns.push({ header: `${trade} To Pay`, items });
-    }
-
-    // 🧾 Global buckets
-    // ✅ FIX: use window.assignment here too
-    for (const [job, decision] of window.assignment.entries()) {
-      const allB = allBucketsForDecision(decision);
-      if (allB.some(b => String(b || "").includes("Jobs To Invoice"))) invoice.push(job);
-      if (allB.some(b => String(b || "").includes("Jobs To Close")))   close.push(job);
-      if (allB.some(b => String(b || "").includes("Liens Needed")))    lien.push(job);
-    }
-
-    // ✅ Safe to sort now
-    invoice.sort(compareJobsByStreet);
-    close.sort(compareJobsByStreet);
-    lien.sort(compareJobsByStreet);
-
-    // ✅ Add to columns
-    columns.push({ header: "Jobs To Invoice", items: invoice });
-    columns.push({ header: "Jobs To Close",   items: close });
-    columns.push({ header: "Liens Needed",    items: lien });
-
-    // 🪟 Render everything
-    renderColumns(columns);
-    const aoaOut = buildAOA(columns);
-
-    // 🔍 Debugging: expose and inspect buckets
-    window.allBuckets = Object.fromEntries(columns.map(c => [c.header, c.items]));
-    console.log("📦 All bucket headers:", Object.keys(window.allBuckets));
-    console.log("🧩 Siding bucket contents:", window.allBuckets["Siding To Pay"]);
-  } catch (err) {
-    console.error("❌ finishCompute failed:", err);
-  }
-
-
-
-
-
-
-  $download.disabled = false;
-  // Enable and bind download AFTER compute finishes
-// Enable download button AFTER compute finishes
-// Enable download button AFTER compute finishes
-$downloadBtn.disabled = false;
-$downloadBtn.onclick = () => {
-    if (!state || !state.jobGroups) {
-        alert("Nothing to export. Click Compute first.");
-        return;
-    }
-
-const aoaOut = buildAOA();
-    const location = document.getElementById("locationSelect")?.value || "Unknown";
-    const date = new Date().toISOString().split("T")[0];
-    const filename = `${location}_Jobs_${date}.csv`;
-
-    downloadAOA(aoaOut, filename);
-};
-
-
-
-
   const counts = columns.map(c => `${c.header}=${c.items.length}`).join(" • ");
   log(`Computation complete. ${counts}`, "ok");
   $summary.textContent = "Done.";
-}
+
 
     function paidFamilyAny(records, info, tokens, decideDone){
       const rows = records.map(({ r }) => ({ r, s: textOf(r, info) }));
