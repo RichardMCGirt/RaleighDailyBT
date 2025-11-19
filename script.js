@@ -1128,7 +1128,6 @@ function buildAoaExport() {
 
 
   $download.disabled = false;
-  state = { rows: allRows, info, jobGroups, assignment, combinedStatus };
   // Enable and bind download AFTER compute finishes
 // Enable download button AFTER compute finishes
 // Enable download button AFTER compute finishes
@@ -1139,7 +1138,7 @@ $downloadBtn.onclick = () => {
         return;
     }
 
-    const aoaOut = buildAoaExport();   // now works globally
+const aoaOut = buildAOA();
     const location = document.getElementById("locationSelect")?.value || "Unknown";
     const date = new Date().toISOString().split("T")[0];
     const filename = `${location}_Jobs_${date}.csv`;
