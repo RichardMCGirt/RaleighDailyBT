@@ -115,8 +115,10 @@ let state = null;
 /* ----------------- config ----------------- */
 const TRADES = [
   "Painters","Siding","Columns","Trellis","Porch","Screen Porch",
-  "Decking","Waterproof","Louvered Wall","Gutters","Rails" // 👈 add here
+  "Decking","Waterproof","Louvered Wall","Gutters","Rails",
+  "HVAC"   // 👈 ADD THIS
 ];
+
 
 // ---- Trade detection helpers ----
 const TRADE_GROUPS = {
@@ -126,7 +128,9 @@ const TRADE_GROUPS = {
   paint:        ["paint", "painter", "painting"],
   housewrap:    ["house wrap","housewrap"],
   "screen porch": ["screen porch", "screened porch"],
-  columns:      ["column", "columns"]
+  columns:      ["column", "columns"],
+    hvac: ["hvac","ac","a/c","air conditioning","air handler","heat pump"]
+
 };
 
 
@@ -141,7 +145,9 @@ const TRADE_TOKEN_MAP = {
   "Waterproof": "waterproof",
   "Louvered Wall": "louvered wall",
   "Gutters": "gutters",
-  "Rails": "rails" // 👈 add this
+  "Rails": "rails", // 👈 add this
+    "HVAC": "hvac"
+
 };
 
 // 🧩 Normalize job names consistently (spaces, casing)
@@ -228,6 +234,44 @@ function findUnpaidTrade(records, info) {
 
     const tradeComplete = hasTradeCompleteSignal(prettyLabel, records, info);
 
+    // ---------- HVAC special case ----------
+    if (tradeKey === "hvac") {
+      let hvacComplete = false;
+      let hvacPaidDone = false;
+      let hvacPaidPending = false;
+
+      const hvacTokens = ["hvac","a/c","ac","air handler","air conditioning","heat pump"];
+
+      for (const { r } of records) {
+        const title = safeCell(r[info.titleIdx]).toLowerCase();
+        const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+        const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+
+        const hasToken = hvacTokens.some(t => title.includes(t));
+
+        // HVAC COMPLETE
+        if (hasToken && title.includes("complete")) {
+          if (done || pct >= 100) hvacComplete = true;
+        }
+
+        // PAID HVAC
+        if (hasToken && title.includes("paid")) {
+          if (done || pct >= 100) hvacPaidDone = true;
+          else hvacPaidPending = true;
+        }
+      }
+
+      if (hvacComplete && !hvacPaidDone) {
+        unpaidTrades.push({
+          trade: "hvac",
+          bucket: "HVAC To Pay",
+          reason: "HVAC complete but unpaid"
+        });
+      }
+
+      continue;
+    }
+
     // ---------- SIDING special case ----------
     if (tradeKey === "siding") {
       const inspectedFinalDone = records.some(({ r }) => {
@@ -263,6 +307,40 @@ function findUnpaidTrade(records, info) {
   return unpaidTrades.length > 0 ? unpaidTrades : null;
 }
 
+function hvacNeedsToBePaid(records, info) {
+  const tokens = ["hvac","a/c","ac","air handler","air conditioning","heat pump"];
+
+  let hvacComplete = false;
+  let hvacPaidDone = false;
+  let hvacPaidPending = false;
+
+  for (const { r } of records) {
+    const title = safeCell(r[info.titleIdx]).toLowerCase();
+    const done  = info.completedIdx >= 0 ? isTruthy(r[info.completedIdx]) : false;
+    const pct   = info.percentCompleteIdx >= 0 ? Number(r[info.percentCompleteIdx]) : NaN;
+
+    const hasToken = tokens.some(t => title.includes(t));
+
+    // HVAC COMPLETE
+    if (hasToken && title.includes("complete")) {
+      if (done || pct >= 100) hvacComplete = true;
+    }
+
+    // PAID HVAC
+    if (hasToken && title.includes("paid")) {
+      if (done || pct >= 100) hvacPaidDone = true;
+      else hvacPaidPending = true;
+    }
+  }
+
+  // RULES:
+  // 1. HVAC complete AND (paid incomplete OR no paid)
+  if (hvacComplete && !hvacPaidDone) {
+    return true;
+  }
+
+  return false;
+}
 
 
 
@@ -919,7 +997,6 @@ function classifyAllJobs(allJobs, info) {
   }
 }
 
-
 function finishCompute() {
   try {
     // ✅ Use the global Map we filled earlier
@@ -937,6 +1014,54 @@ function finishCompute() {
     const invoice = [];
     const close = [];
     const lien = [];
+// =======================================================
+// 🔧 Build Export AOA (Array Of Arrays) for Excel Export
+// =======================================================
+// =======================================================
+// 🌟 Global Export Builder — Works for CSV & Excel
+// =======================================================
+function buildAoaExport() {
+    if (!state || !state.jobGroups) {
+        console.error("❌ No state available to export");
+        return [["Error: No data"]];
+    }
+
+    const rows = [];
+    const header = ["Job", "Bucket", "Reason", "Trade"];
+    rows.push(header);
+
+    for (const jobName in state.jobGroups) {
+        const job = state.jobGroups[jobName];
+        if (!job) continue;
+
+        // Primary bucket
+        rows.push([
+            jobName,
+            job.bucket || "",
+            job.reason || "",
+            job.trade || ""
+        ]);
+
+        // Duplicate buckets
+        if (Array.isArray(job.duplicates)) {
+            for (const dup of job.duplicates) {
+                rows.push([
+                    jobName,
+                    dup.bucket || "",
+                    dup.reason || "",
+                    dup.trade || ""
+                ]);
+            }
+        }
+    }
+
+    return rows;
+}
+
+
+
+
+
 
     function allBucketsForDecision(decision) {
       const arr = [];
@@ -998,16 +1123,32 @@ function finishCompute() {
   }
 
 
-  // 📥 Setup CSV download
-  $download.onclick = () => {
-    const location = document.getElementById("locationSelect")?.value || "Unknown";
-    const date = new Date().toISOString().split("T")[0];
-    const filename = `${location}_Jobs_${date}.csv`;
-    downloadAOA(aoaOut, filename);
-  };
+
+
+
 
   $download.disabled = false;
   state = { rows: allRows, info, jobGroups, assignment, combinedStatus };
+  // Enable and bind download AFTER compute finishes
+// Enable download button AFTER compute finishes
+// Enable download button AFTER compute finishes
+$downloadBtn.disabled = false;
+$downloadBtn.onclick = () => {
+    if (!state || !state.jobGroups) {
+        alert("Nothing to export. Click Compute first.");
+        return;
+    }
+
+    const aoaOut = buildAoaExport();   // now works globally
+    const location = document.getElementById("locationSelect")?.value || "Unknown";
+    const date = new Date().toISOString().split("T")[0];
+    const filename = `${location}_Jobs_${date}.csv`;
+
+    downloadAOA(aoaOut, filename);
+};
+
+
+
 
   const counts = columns.map(c => `${c.header}=${c.items.length}`).join(" • ");
   log(`Computation complete. ${counts}`, "ok");
