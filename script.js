@@ -1086,51 +1086,6 @@ function finishCompute() {
   }
 }
 
-
-function buildAoa() {
-    if (!state || !state.jobGroups) {
-        console.error("❌ No state available to export");
-        return [["Error: No data"]];
-    }
-
-    const rows = [];
-    const header = ["Job", "Bucket", "Reason", "Trade"];
-    rows.push(header);
-
-    for (const jobName in state.jobGroups) {
-        const job = state.jobGroups[jobName];
-        if (!job) continue;
-
-        // Primary bucket
-        rows.push([
-            jobName,
-            job.bucket || "",
-            job.reason || "",
-            job.trade || ""
-        ]);
-
-        // Duplicate buckets
-        if (Array.isArray(job.duplicates)) {
-            for (const dup of job.duplicates) {
-                rows.push([
-                    jobName,
-                    dup.bucket || "",
-                    dup.reason || "",
-                    dup.trade || ""
-                ]);
-            }
-        }
-    }
-
-    return rows;
-}
-
-
-  const counts = columns.map(c => `${c.header}=${c.items.length}`).join(" • ");
-  log(`Computation complete. ${counts}`, "ok");
-  $summary.textContent = "Done.";
-
-
     function paidFamilyAny(records, info, tokens, decideDone){
       const rows = records.map(({ r }) => ({ r, s: textOf(r, info) }));
       const paidRows = rows.filter(x => x.s.includes("paid") && tokens.some(t => x.s.includes(t)));
@@ -1622,11 +1577,9 @@ function buildAOA(columns) {
   const nonEmpty = columns.filter(c => Array.isArray(c.items) && c.items.length > 0);
 
   const header1 = [];
-  const header2 = [];
 
   for (const c of nonEmpty) {
     header1.push(c.header);
-    header2.push("Key");
   }
 
   const maxLen = Math.max(0, ...nonEmpty.map(c => c.items.length));
@@ -1640,7 +1593,7 @@ function buildAOA(columns) {
     rows.push(line);
   }
 
-  return [header1, header2, ...rows];
+  return [header1, ...rows];
 }
 
 // Aliases used for debug display in Explain panel
