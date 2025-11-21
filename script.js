@@ -634,15 +634,30 @@ if (lienRow) {
 const closeReady = invoiceOk && (hasStrictFinal || hasInspectedFinal);
   console.log("⚙️ Checking lien logic for", job, "| done =", done, "| pct =", pct, "| closeReady =", closeReady);
 
+// --- NEW RULE: skip lien bucket if “100% Job Complete” exists but is FALSE ---
+const strictFinalRow = records.find(({ r }) => {
+  const title = String(r[info.titleIdx] || "").toLowerCase();
+  return title.includes("100% job complete");
+});
+
+const strictFinalMarkedFalse =
+  strictFinalRow &&
+  info.completedIdx >= 0 &&
+  isFalse(strictFinalRow.r[info.completedIdx]);
+
+// if strict final exists and Completed = FALSE → do NOT evaluate liens
+if (strictFinalMarkedFalse) {
+  console.log(`⛔ Skipping lien bucket — strict final exists but Completed=FALSE for job: ${job}`);
+  // do nothing — do not add lien bucket
+} else {
+  // existing lien logic
   if (closeReady && (!done || pct < 100)) {
     console.log("🚨 Lien incomplete — marking Liens Needed for", job);
 
-    // 🪶 Lien takes precedence only if no other bucket or job-to-close
     if (!result.bucket || result.bucket === "Jobs To Close") {
       result.bucket = "Liens Needed";
       result.reason = "Lien record incomplete — cannot close job";
     } else if (!result.duplicates.some(d => d.bucket === "Liens Needed")) {
-      // Add as duplicate if some other trade bucket already exists
       result.duplicates.push({
         bucket: "Liens Needed",
         reason: "Lien record incomplete — cannot close job",
@@ -653,6 +668,7 @@ const closeReady = invoiceOk && (hasStrictFinal || hasInspectedFinal);
   }
 }
 
+}
 
     // ----------------- RETURN RESULT -----------------
     return result;
